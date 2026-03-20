@@ -644,7 +644,6 @@ async function doConnectBank(bankId, institutionId) {
         redirect: state.config.redirectUri,
         institution_id: institutionId,
         reference: `statement-vault-${bankId}-${Date.now()}`,
-        agreement: '',
         user_language: 'EN'
       })
     });
