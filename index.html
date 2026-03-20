@@ -426,7 +426,7 @@ async function doConnectBank(bankId, searchName) {
 
     if (data.link) {
       state.requisitions[bankId] = data.id;
-      sessionStorage.setItem(`req_${bankId}`, data.id);
+      localStorage.setItem(`req_${bankId}`, data.id);
       log(`Requisition created (${data.id}). Opening bank auth...`, 'ok');
 
       const popup = window.open(data.link, `gc_auth_${bankId}`, 'width=600,height=700,scrollbars=yes');
@@ -448,7 +448,7 @@ async function doConnectBank(bankId, searchName) {
 }
 
 async function loadAccounts(bankId) {
-  const reqId = state.requisitions[bankId] || sessionStorage.getItem(`req_${bankId}`);
+  const reqId = state.requisitions[bankId] || localStorage.getItem(`req_${bankId}`);
   if (!reqId) { log(`No requisition found for ${bankId}.`, 'warn'); return; }
 
   const token = state.tokens.gocardless || await getGCToken();
@@ -654,6 +654,18 @@ function setDot(bankId, status) {
   const dot = document.getElementById('dot-' + bankId);
   dot.className = 'status-dot' + (status !== 'none' ? ' ' + status : '');
 }
+
+// Auto-resume any previously connected banks on page load
+window.addEventListener('load', async () => {
+  for (const bankId of ['nationwide', 'tesco']) {
+    const reqId = localStorage.getItem('req_' + bankId);
+    if (reqId) {
+      state.requisitions[bankId] = reqId;
+      log('Resuming ' + bankId + ' session from previous connection...', 'info');
+      await loadAccounts(bankId);
+    }
+  }
+});
 
 // Default date range — last 3 months
 const today = new Date();
