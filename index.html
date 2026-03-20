@@ -295,9 +295,27 @@ function saveConfig() {
   state.config.env = document.getElementById('gcEnv').value;
   state.config.redirectUri = document.getElementById('redirectUri').value.trim();
   state.config.driveClientId = document.getElementById('driveClientId').value.trim();
+  // Persist config to localStorage
+  localStorage.setItem('sv_config', JSON.stringify(state.config));
   log('Configuration saved.', 'ok');
-  // Look up real institution IDs after saving config
   lookupAllInstitutionIds();
+}
+
+function loadSavedConfig() {
+  const saved = localStorage.getItem('sv_config');
+  if (!saved) return;
+  try {
+    const c = JSON.parse(saved);
+    state.config = { ...state.config, ...c };
+    document.getElementById('gcSecretId').value = c.secretId || '';
+    document.getElementById('gcSecretKey').value = c.secretKey || '';
+    document.getElementById('gcEnv').value = c.env || 'production';
+    document.getElementById('redirectUri').value = c.redirectUri || '';
+    document.getElementById('driveClientId').value = c.driveClientId || '';
+    log('Config restored from previous session.', 'ok');
+  } catch(e) {
+    log('Could not restore config: ' + e.message, 'warn');
+  }
 }
 
 async function getGCToken() {
@@ -663,14 +681,17 @@ function setDot(bankId, status) {
   dot.className = 'status-dot' + (status !== 'none' ? ' ' + status : '');
 }
 
-// Auto-resume any previously connected banks on page load
+// On page load: restore config then auto-resume connected banks
 window.addEventListener('load', async () => {
-  for (const bankId of ['nationwide', 'tesco']) {
-    const reqId = localStorage.getItem('req_' + bankId);
-    if (reqId) {
-      state.requisitions[bankId] = reqId;
-      log('Resuming ' + bankId + ' session from previous connection...', 'info');
-      await loadAccounts(bankId);
+  loadSavedConfig();
+  if (state.config.secretId && state.config.secretKey) {
+    for (const bankId of ['nationwide', 'tesco']) {
+      const reqId = localStorage.getItem('req_' + bankId);
+      if (reqId) {
+        state.requisitions[bankId] = reqId;
+        log('Resuming ' + bankId + ' session...', 'info');
+        await loadAccounts(bankId);
+      }
     }
   }
 });
