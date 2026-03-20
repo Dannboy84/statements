@@ -306,13 +306,23 @@ function loadSavedConfig() {
   if (!saved) return;
   try {
     const c = JSON.parse(saved);
+    // Merge into state first
     state.config = { ...state.config, ...c };
-    document.getElementById('gcSecretId').value = c.secretId || '';
-    document.getElementById('gcSecretKey').value = c.secretKey || '';
-    document.getElementById('gcEnv').value = c.env || 'production';
-    document.getElementById('redirectUri').value = c.redirectUri || '';
-    document.getElementById('driveClientId').value = c.driveClientId || '';
-    log('Config restored from previous session.', 'ok');
+    // Then populate all fields — use setAttribute for password fields
+    const secretIdEl = document.getElementById('gcSecretId');
+    const secretKeyEl = document.getElementById('gcSecretKey');
+    const envEl = document.getElementById('gcEnv');
+    const redirectEl = document.getElementById('redirectUri');
+    const driveEl = document.getElementById('driveClientId');
+    if (secretIdEl) secretIdEl.value = c.secretId || '';
+    if (secretKeyEl) {
+      secretKeyEl.value = c.secretKey || '';
+      secretKeyEl.setAttribute('value', c.secretKey || '');
+    }
+    if (envEl) envEl.value = c.env || 'production';
+    if (redirectEl) redirectEl.value = c.redirectUri || '';
+    if (driveEl) driveEl.value = c.driveClientId || '';
+    log('Config restored.', 'ok');
   } catch(e) {
     log('Could not restore config: ' + e.message, 'warn');
   }
@@ -728,17 +738,29 @@ function setDot(bankId, status) {
   dot.className = 'status-dot' + (status !== 'none' ? ' ' + status : '');
 }
 
-// On page load: restore config then auto-resume connected banks
+// On page load: restore config, get fresh token, resume banks
 window.addEventListener('load', async () => {
   loadSavedConfig();
-  if (state.config.secretId && state.config.secretKey) {
-    for (const bankId of ['nationwide', 'tesco']) {
-      const reqId = localStorage.getItem('req_' + bankId);
-      if (reqId) {
-        state.requisitions[bankId] = reqId;
-        log('Resuming ' + bankId + ' session...', 'info');
-        await loadAccounts(bankId);
-      }
+
+  if (!state.config.secretId || !state.config.secretKey) {
+    log('Enter your GoCardless credentials and click Save Config.', 'warn');
+    return;
+  }
+
+  // Always get a fresh token on load (tokens expire)
+  const token = await getGCToken();
+  if (!token) return;
+
+  // Look up institution IDs
+  await lookupAllInstitutionIds();
+
+  // Resume any previously connected banks
+  for (const bankId of ['nationwide', 'tesco']) {
+    const reqId = localStorage.getItem('req_' + bankId);
+    if (reqId) {
+      state.requisitions[bankId] = reqId;
+      log('Resuming ' + bankId + ' session...', 'info');
+      await loadAccounts(bankId);
     }
   }
 });
