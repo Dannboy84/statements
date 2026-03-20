@@ -598,9 +598,15 @@ function txnsToCSV(txns) {
 }
 
 function getBankCSV(bankId, txns) {
-  if (bankId === 'nationwide') return nationwideToCSV(txns);
-  if (bankId === 'tesco') return tescoToCSV(txns);
-  return txnsToCSV(txns);
+  try {
+    if (bankId === 'nationwide') return nationwideToCSV(txns);
+    if (bankId === 'tesco') return tescoToCSV(txns);
+    return txnsToCSV(txns);
+  } catch(e) {
+    log('CSV generation error for ' + bankId + ': ' + e.message, 'err');
+    log('Falling back to generic CSV...', 'warn');
+    return txnsToCSV(txns);
+  }
 }
 
 function downloadCSV(bankId) {
@@ -628,7 +634,15 @@ function downloadCSV(bankId) {
     csv = txnsToCSV(txns);
   } else {
     filename = `${bankId}-statements-${dateFrom}-to-${dateTo}.csv`;
+    log(`Generating ${bankId} CSV...`, 'info');
     csv = getBankCSV(bankId, txns);
+    log(`CSV generated: ${csv ? csv.split('
+').length + ' rows' : 'EMPTY'}`, csv ? 'ok' : 'err');
+  }
+  
+  if (!csv) {
+    log('CSV is empty, cannot download.', 'err');
+    return;
   }
 
   try {
