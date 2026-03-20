@@ -180,7 +180,7 @@
       <div class="bank-meta" id="meta-nationwide">Building Society · looking up ID...</div>
       <div class="bank-actions">
         <button class="btn btn-ghost btn-sm" onclick="connectBank('nationwide','Nationwide')">🔗 Connect</button>
-        <button class="btn btn-ghost btn-sm" onclick="refreshAccounts('nationwide')" id="refresh-nationwide" style="display:none">↻ Refresh</button>
+        <button class="btn btn-ghost btn-sm" onclick="refreshAccounts('nationwide')" id="refresh-nationwide">↻ Refresh</button>
       </div>
       <div class="accounts-list" id="accounts-nationwide"></div>
     </div>
@@ -194,7 +194,7 @@
       <div class="bank-meta" id="meta-tesco">Credit Card · looking up ID...</div>
       <div class="bank-actions">
         <button class="btn btn-ghost btn-sm" onclick="connectBank('tesco','Tesco')">🔗 Connect</button>
-        <button class="btn btn-ghost btn-sm" onclick="refreshAccounts('tesco')" id="refresh-tesco" style="display:none">↻ Refresh</button>
+        <button class="btn btn-ghost btn-sm" onclick="refreshAccounts('tesco')" id="refresh-tesco">↻ Refresh</button>
       </div>
       <div class="accounts-list" id="accounts-tesco"></div>
     </div>
@@ -449,14 +449,17 @@ async function doConnectBank(bankId, searchName) {
 
 async function loadAccounts(bankId) {
   const reqId = state.requisitions[bankId] || localStorage.getItem(`req_${bankId}`);
-  if (!reqId) { log(`No requisition found for ${bankId}.`, 'warn'); return; }
+  log(`[${bankId}] Requisition ID: ${reqId || 'NONE'}`, 'info');
+  if (!reqId) { log(`No requisition found for ${bankId}. Please connect the bank.`, 'warn'); return; }
 
   const token = state.tokens.gocardless || await getGCToken();
   if (!token) return;
 
   try {
+    log(`[${bankId}] Fetching requisition status...`, 'info');
     const res = await fetch(`${GC_BASE()}/requisitions/${reqId}/`, { headers: gcHeaders() });
     const data = await res.json();
+    log(`[${bankId}] Requisition status: ${data.status} | accounts: ${JSON.stringify(data.accounts)}`, 'info');
 
     if (data.accounts && data.accounts.length > 0) {
       state.accounts[bankId] = data.accounts;
@@ -465,8 +468,13 @@ async function loadAccounts(bankId) {
       document.getElementById('refresh-' + bankId).style.display = 'inline-flex';
       log(`${bankId}: ${data.accounts.length} account(s) connected.`, 'ok');
       renderAccounts(bankId, data.accounts);
+    } else if (data.status === 'LN' || data.status === 'EX') {
+      log(`[${bankId}] Requisition expired or invalid (status: ${data.status}). Clearing and reconnecting...`, 'warn');
+      localStorage.removeItem(`req_${bankId}`);
+      state.requisitions[bankId] = null;
+      setDot(bankId, 'none');
     } else {
-      log(`${bankId}: No accounts found yet. Status: ${data.status}`, 'warn');
+      log(`[${bankId}] No accounts yet. Status: ${data.status}. If you completed bank login, try clicking Refresh.`, 'warn');
       setDot(bankId, 'none');
     }
   } catch (e) {
