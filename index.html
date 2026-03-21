@@ -98,6 +98,19 @@
   .tab.active { background: var(--accent-dim); border-color: #3a5a3b; color: var(--accent); }
   .tab-content { display: none; }
   .tab-content.active { display: block; }
+  .search-results { margin-top: 12px; max-height: 300px; overflow-y: auto; }
+  .search-result-item { background: var(--bg); border: 1px solid var(--border-light); border-radius: 8px; padding: 12px 14px; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; transition: border-color 0.15s; }
+  .search-result-item:hover { border-color: var(--accent); }
+  .search-result-name { font-size: 12px; color: var(--text); }
+  .search-result-id { font-size: 10px; color: var(--muted); margin-top: 2px; }
+  .search-input-row { display: flex; gap: 8px; }
+  .search-input-row input { flex: 1; }
+  .add-bank-btn { background: var(--border); border: 1px dashed var(--border-light); border-radius: var(--radius); padding: 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; cursor: pointer; transition: all 0.2s; min-height: 160px; }
+  .add-bank-btn:hover { border-color: var(--accent); background: var(--accent-dim); }
+  .add-bank-btn .plus { font-size: 28px; color: var(--muted); }
+  .add-bank-btn .label { font-size: 11px; color: var(--muted); }
+  .extra-banks { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  @media (max-width: 600px) { .extra-banks { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -387,22 +400,27 @@ async function lookupAllInstitutionIds() {
 }
 
 // ── Connect Bank ──────────────────────────────────────────────────────────────
-function connectBank(bankId, searchName) {
+function connectBank(bankId, searchNameOrId, isDirectId) {
+  var displayName = (state.extraBanks && state.extraBanks[bankId]) ? state.extraBanks[bankId].name : (bankId === 'nationwide' ? 'Nationwide' : bankId === 'tesco' ? 'Tesco Bank' : bankId);
   openModal(
-    'Connect ' + (bankId === 'nationwide' ? 'Nationwide' : 'Tesco Bank'),
+    'Connect ' + displayName,
     "You'll be redirected to GoCardless's secure Open Banking portal. This uses the official bank login — no credentials are stored here.",
-    function() { doConnectBank(bankId, searchName); }
+    function() { doConnectBank(bankId, searchNameOrId, isDirectId); }
   );
 }
 
-async function doConnectBank(bankId, searchName) {
+async function doConnectBank(bankId, searchNameOrId, isDirectId) {
   setDot(bankId, 'loading');
   var token = state.tokens.gocardless || await getGCToken();
   if (!token) { setDot(bankId, 'none'); return; }
 
   var institutionId = state.institutionIds[bankId];
   if (!institutionId) {
-    institutionId = await lookupInstitutionId(searchName);
+    if (isDirectId) {
+      institutionId = searchNameOrId;
+    } else {
+      institutionId = await lookupInstitutionId(searchNameOrId);
+    }
     if (!institutionId) { setDot(bankId, 'none'); return; }
     state.institutionIds[bankId] = institutionId;
   }
@@ -525,7 +543,8 @@ async function fetchAll() {
   var token = state.tokens.gocardless || await getGCToken();
   if (!token) return;
 
-  var banks = ['nationwide', 'tesco'].filter(function(b) { return state.accounts[b].length > 0; });
+  var allBankKeys = ['nationwide', 'tesco'].concat(Object.keys(state.extraBanks || {}));
+  var banks = allBankKeys.filter(function(b) { return state.accounts[b] && state.accounts[b].length > 0; });
   if (banks.length === 0) { log('No banks connected. Click Connect on each bank first.', 'warn'); return; }
 
   var totalFetched = 0;
@@ -708,7 +727,7 @@ function genericToCSV(txns) {
 function getCSV(bankId, txns) {
   if (bankId === 'nationwide') return nationwideToCSV(txns);
   if (bankId === 'tesco') return tescoToCSV(txns);
-  return genericToCSV(txns);
+  return genericToCSV(txns); // extra banks use generic format
 }
 
 function downloadCSV(bankId) {
@@ -772,7 +791,8 @@ async function saveToDrive() {
   if (!state.tokens.drive) { log('Connect Google Drive first.', 'warn'); connectDrive(); return; }
   var dateFrom = document.getElementById('dateFrom').value;
   var dateTo   = document.getElementById('dateTo').value;
-  var banks = ['nationwide','tesco'].filter(function(b) { return state.transactions[b] && state.transactions[b].length > 0; });
+  var allDriveBanks = ['nationwide','tesco'].concat(Object.keys(state.extraBanks || {}));
+  var banks = allDriveBanks.filter(function(b) { return state.transactions[b] && state.transactions[b].length > 0; });
   if (!banks.length) { log('No transactions to save. Fetch first.', 'warn'); return; }
   log('Saving to Google Drive...', 'info');
   var folderId = await getOrCreateDriveFolder('Bank Statements');
@@ -781,7 +801,8 @@ async function saveToDrive() {
     var b = banks[i];
     await uploadFileToDrive(b + '-statements-' + dateFrom + '-to-' + dateTo + '.csv', getCSV(b, state.transactions[b]), folderId);
   }
-  var all = (state.transactions.nationwide || []).concat(state.transactions.tesco || []);
+  var allTxnBanks = ['nationwide','tesco'].concat(Object.keys(state.extraBanks || {}));
+  var all = allTxnBanks.reduce(function(acc, b) { return acc.concat(state.transactions[b] || []); }, []);
   if (all.length) await uploadFileToDrive('all-statements-' + dateFrom + '-to-' + dateTo + '.csv', genericToCSV(all), folderId);
   log('All files saved to Google Drive -> Bank Statements/', 'ok');
 }
@@ -810,8 +831,10 @@ async function init() {
   var token = await getGCToken();
   if (!token) return;
   await lookupAllInstitutionIds();
-  for (var i = 0; i < ['nationwide','tesco'].length; i++) {
-    var bankId = ['nationwide','tesco'][i];
+  restoreExtraBanks();
+  var allKeys = ['nationwide','tesco'].concat(Object.keys(state.extraBanks || {}));
+  for (var i = 0; i < allKeys.length; i++) {
+    var bankId = allKeys[i];
     var reqId = localStorage.getItem('req_' + bankId);
     if (reqId) {
       state.requisitions[bankId] = reqId;
@@ -827,7 +850,138 @@ var threeAgo = new Date(); threeAgo.setMonth(today.getMonth() - 3);
 document.getElementById('dateTo').value   = today.toISOString().split('T')[0];
 document.getElementById('dateFrom').value = threeAgo.toISOString().split('T')[0];
 
-// On page load
+// ── Add Bank ──────────────────────────────────────────────────────────────────
+// Extra banks added by the user (stored in localStorage)
+state.extraBanks = {};
+
+function openAddBankModal() {
+  document.getElementById('bankSearchInput').value = '';
+  document.getElementById('searchResults').innerHTML = '';
+  document.getElementById('addBankModal').classList.add('open');
+  setTimeout(function() { document.getElementById('bankSearchInput').focus(); }, 100);
+}
+
+function closeAddBankModal() {
+  document.getElementById('addBankModal').classList.remove('open');
+}
+
+async function searchInstitutions() {
+  var query = document.getElementById('bankSearchInput').value.trim();
+  if (!query) return;
+
+  var resultsEl = document.getElementById('searchResults');
+  resultsEl.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:8px 0">Searching...</div>';
+
+  var token = state.tokens.gocardless || await getGCToken();
+  if (!token) { resultsEl.innerHTML = '<div style="color:var(--tesco-light);font-size:11px;padding:8px 0">Not authenticated. Save your config first.</div>'; return; }
+
+  try {
+    var res = await fetch(gcBase() + '/institutions/?country=gb', { headers: gcHeaders() });
+    var data = await res.json();
+    if (!Array.isArray(data)) { resultsEl.innerHTML = '<div style="color:var(--tesco-light);font-size:11px;">Error: ' + JSON.stringify(data) + '</div>'; return; }
+
+    var matches = data.filter(function(i) {
+      return i.name.toLowerCase().indexOf(query.toLowerCase()) !== -1;
+    });
+
+    if (matches.length === 0) {
+      resultsEl.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:8px 0">No results for "' + query + '". Try a different name.</div>';
+      return;
+    }
+
+    resultsEl.innerHTML = '<div style="font-size:10px;color:var(--muted);margin:8px 0 6px;text-transform:uppercase;letter-spacing:1px;">' + matches.length + ' result' + (matches.length !== 1 ? 's' : '') + '</div>';
+    matches.forEach(function(inst) {
+      var item = document.createElement('div');
+      item.className = 'search-result-item';
+      item.innerHTML = '<div><div class="search-result-name">' + inst.name + '</div><div class="search-result-id">' + inst.id + '</div></div><button class="btn btn-primary btn-sm" onclick="addExtraBank('' + inst.id + '','' + inst.name.replace(/'/g, "\'") + '')">Add</button>';
+      resultsEl.appendChild(item);
+    });
+  } catch(e) {
+    resultsEl.innerHTML = '<div style="color:var(--tesco-light);font-size:11px;">Search error: ' + e.message + '</div>';
+  }
+}
+
+function addExtraBank(institutionId, institutionName) {
+  closeAddBankModal();
+
+  // Generate a safe key from the institution name
+  var bankKey = institutionId.toLowerCase().replace(/[^a-z0-9]/g, '_');
+
+  // Avoid duplicates
+  if (state.extraBanks[bankKey]) {
+    log(institutionName + ' is already added.', 'warn');
+    return;
+  }
+
+  // Register in state
+  state.extraBanks[bankKey] = { id: institutionId, name: institutionName };
+  state.institutionIds[bankKey] = institutionId;
+  state.accounts[bankKey] = [];
+  state.transactions[bankKey] = [];
+
+  // Save to localStorage
+  localStorage.setItem('extraBanks', JSON.stringify(state.extraBanks));
+
+  // Render the card
+  renderExtraBankCard(bankKey, institutionName, institutionId);
+  log('Added bank: ' + institutionName + ' (' + institutionId + ')', 'ok');
+}
+
+function renderExtraBankCard(bankKey, name, institutionId) {
+  var container = document.getElementById('extraBanks');
+  var initial = name.charAt(0).toUpperCase();
+  var card = document.createElement('div');
+  card.className = 'bank-card';
+  card.id = 'card-' + bankKey;
+  card.style.cssText = 'position:relative;overflow:hidden;';
+  card.innerHTML =
+    '<div style="position:absolute;top:0;left:0;right:0;height:2px;background:var(--accent-dim)"></div>' +
+    '<div class="bank-header">' +
+      '<div class="bank-icon" style="background:var(--accent-dim);color:var(--accent)">' + initial + '</div>' +
+      '<div class="status-dot" id="dot-' + bankKey + '"></div>' +
+    '</div>' +
+    '<div class="bank-name">' + name + '</div>' +
+    '<div class="bank-meta" id="meta-' + bankKey + '">' + institutionId + '</div>' +
+    '<div class="bank-actions">' +
+      '<button class="btn btn-ghost btn-sm" onclick="connectBank('' + bankKey + '','' + institutionId + '',true)">Connect</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="refreshAccounts('' + bankKey + '')">Refresh</button>' +
+      '<button class="btn btn-ghost btn-sm" style="color:var(--tesco-light);border-color:var(--tesco-light)" onclick="removeExtraBank('' + bankKey + '')">Remove</button>' +
+    '</div>' +
+    '<div class="accounts-list" id="accounts-' + bankKey + '"></div>';
+  container.appendChild(card);
+}
+
+function removeExtraBank(bankKey) {
+  delete state.extraBanks[bankKey];
+  delete state.institutionIds[bankKey];
+  delete state.accounts[bankKey];
+  delete state.transactions[bankKey];
+  localStorage.removeItem('req_' + bankKey);
+  localStorage.setItem('extraBanks', JSON.stringify(state.extraBanks));
+  var card = document.getElementById('card-' + bankKey);
+  if (card) card.parentNode.removeChild(card);
+  log('Removed bank: ' + bankKey, 'info');
+}
+
+function restoreExtraBanks() {
+  var saved = localStorage.getItem('extraBanks');
+  if (!saved) return;
+  try {
+    var banks = JSON.parse(saved);
+    Object.keys(banks).forEach(function(bankKey) {
+      var b = banks[bankKey];
+      state.extraBanks[bankKey] = b;
+      state.institutionIds[bankKey] = b.id;
+      state.accounts[bankKey] = [];
+      state.transactions[bankKey] = [];
+      renderExtraBankCard(bankKey, b.name, b.id);
+    });
+  } catch(e) {
+    log('Could not restore extra banks: ' + e.message, 'warn');
+  }
+}
+
+// ── On page load
 window.addEventListener('load', function() {
   var restored = loadSavedConfig();
   if (restored && state.config.secretId && state.config.secretKey) {
@@ -837,5 +991,20 @@ window.addEventListener('load', function() {
   }
 });
 </script>
+<div class="modal-overlay" id="addBankModal">
+  <div class="modal" style="max-width:520px">
+    <h2>Add a Bank</h2>
+    <p>Search for your bank by name. GoCardless will return matching UK institutions.</p>
+    <div class="search-input-row">
+      <input type="text" id="bankSearchInput" placeholder="e.g. Barclays, Monzo, Halifax..." onkeydown="if(event.key==='Enter')searchInstitutions()"/>
+      <button class="btn btn-primary" onclick="searchInstitutions()">Search</button>
+    </div>
+    <div class="search-results" id="searchResults"></div>
+    <div class="modal-actions" style="margin-top:16px">
+      <button class="btn btn-ghost" onclick="closeAddBankModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
