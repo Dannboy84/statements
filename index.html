@@ -899,7 +899,10 @@ async function searchInstitutions() {
     matches.forEach(function(inst) {
       var item = document.createElement('div');
       item.className = 'search-result-item';
-      item.innerHTML = '<div><div class="search-result-name">' + inst.name + '</div><div class="search-result-id">' + inst.id + '</div></div><button class="btn btn-primary btn-sm" onclick="addExtraBank('' + inst.id + '','' + inst.name.replace(/'/g, "\'") + '')">Add</button>';
+      item.dataset.id = inst.id;
+      item.dataset.name = inst.name;
+      item.innerHTML = '<div><div class="search-result-name">' + inst.name + '</div><div class="search-result-id">' + inst.id + '</div></div><button class="btn btn-primary btn-sm">Add</button>';
+      item.querySelector('button').addEventListener('click', function() { addExtraBank(item.dataset.id, item.dataset.name); });
       resultsEl.appendChild(item);
     });
   } catch(e) {
@@ -940,20 +943,67 @@ function renderExtraBankCard(bankKey, name, institutionId) {
   card.className = 'bank-card';
   card.id = 'card-' + bankKey;
   card.style.cssText = 'position:relative;overflow:hidden;';
-  card.innerHTML =
-    '<div style="position:absolute;top:0;left:0;right:0;height:2px;background:var(--accent-dim)"></div>' +
-    '<div class="bank-header">' +
-      '<div class="bank-icon" style="background:var(--accent-dim);color:var(--accent)">' + initial + '</div>' +
-      '<div class="status-dot" id="dot-' + bankKey + '"></div>' +
-    '</div>' +
-    '<div class="bank-name">' + name + '</div>' +
-    '<div class="bank-meta" id="meta-' + bankKey + '">' + institutionId + '</div>' +
-    '<div class="bank-actions">' +
-      '<button class="btn btn-ghost btn-sm" onclick="connectBank('' + bankKey + '','' + institutionId + '',true)">Connect</button>' +
-      '<button class="btn btn-ghost btn-sm" onclick="refreshAccounts('' + bankKey + '')">Refresh</button>' +
-      '<button class="btn btn-ghost btn-sm" style="color:var(--tesco-light);border-color:var(--tesco-light)" onclick="removeExtraBank('' + bankKey + '')">Remove</button>' +
-    '</div>' +
-    '<div class="accounts-list" id="accounts-' + bankKey + '"></div>';
+  card.dataset.bankKey = bankKey;
+  card.dataset.institutionId = institutionId;
+
+  var dot = document.createElement('div');
+  dot.className = 'status-dot';
+  dot.id = 'dot-' + bankKey;
+
+  var icon = document.createElement('div');
+  icon.className = 'bank-icon';
+  icon.style.cssText = 'background:var(--accent-dim);color:var(--accent)';
+  icon.textContent = initial;
+
+  var header = document.createElement('div');
+  header.className = 'bank-header';
+  header.appendChild(icon);
+  header.appendChild(dot);
+
+  var bankName = document.createElement('div');
+  bankName.className = 'bank-name';
+  bankName.textContent = name;
+
+  var meta = document.createElement('div');
+  meta.className = 'bank-meta';
+  meta.id = 'meta-' + bankKey;
+  meta.textContent = institutionId;
+
+  var connectBtn = document.createElement('button');
+  connectBtn.className = 'btn btn-ghost btn-sm';
+  connectBtn.textContent = 'Connect';
+  connectBtn.addEventListener('click', function() { connectBank(bankKey, institutionId, true); });
+
+  var refreshBtn = document.createElement('button');
+  refreshBtn.className = 'btn btn-ghost btn-sm';
+  refreshBtn.textContent = 'Refresh';
+  refreshBtn.addEventListener('click', function() { refreshAccounts(bankKey); });
+
+  var removeBtn = document.createElement('button');
+  removeBtn.className = 'btn btn-ghost btn-sm';
+  removeBtn.style.cssText = 'color:var(--tesco-light);border-color:var(--tesco-light)';
+  removeBtn.textContent = 'Remove';
+  removeBtn.addEventListener('click', function() { removeExtraBank(bankKey); });
+
+  var actions = document.createElement('div');
+  actions.className = 'bank-actions';
+  actions.appendChild(connectBtn);
+  actions.appendChild(refreshBtn);
+  actions.appendChild(removeBtn);
+
+  var accountsList = document.createElement('div');
+  accountsList.className = 'accounts-list';
+  accountsList.id = 'accounts-' + bankKey;
+
+  var topBar = document.createElement('div');
+  topBar.style.cssText = 'position:absolute;top:0;left:0;right:0;height:2px;background:var(--accent-dim)';
+
+  card.appendChild(topBar);
+  card.appendChild(header);
+  card.appendChild(bankName);
+  card.appendChild(meta);
+  card.appendChild(actions);
+  card.appendChild(accountsList);
   container.appendChild(card);
 }
 
