@@ -535,10 +535,28 @@ async function fetchAll() {
   for (var bi = 0; bi < banks.length; bi++) {
     var bankId = banks[bi];
     state.transactions[bankId] = [];
+    state.balances = state.balances || {};
+    state.balances[bankId] = {};
+
     for (var ai = 0; ai < state.accounts[bankId].length; ai++) {
       var accId = state.accounts[bankId][ai];
       setProgress(Math.round(done/total*80), 'Fetching ' + bankId + ' transactions...');
       try {
+        // Fetch current balance for this account
+        var balRes = await fetch(gcBase() + '/accounts/' + accId + '/balances/', { headers: gcHeaders() });
+        var balData = await balRes.json();
+        var currentBalance = null;
+        if (balData.balances && balData.balances.length > 0) {
+          // Prefer interimAvailable or closingBooked
+          var bal = balData.balances.find(function(b) { return b.balanceType === 'closingBooked'; })
+                 || balData.balances.find(function(b) { return b.balanceType === 'interimAvailable'; })
+                 || balData.balances[0];
+          currentBalance = parseFloat(bal.balanceAmount.amount);
+          state.balances[bankId][accId] = currentBalance;
+          log(bankId + ' current balance: £' + currentBalance.toFixed(2), 'info');
+        }
+
+        // Fetch transactions
         var url = gcBase() + '/accounts/' + accId + '/transactions/?date_from=' + from + '&date_to=' + to;
         var res = await fetch(url, { headers: gcHeaders() });
         var data = await res.json();
@@ -575,28 +593,52 @@ function formatNationwideDate(d) {
 }
 
 function nationwideToCSV(txns) {
-  // Header rows matching native Nationwide statement format
+  // Sort newest first (matches native Nationwide export order)
+  var sorted = txns.slice().sort(function(a, b) {
+    var da = a.bookingDate || a.valueDate || '';
+    var db = b.bookingDate || b.valueDate || '';
+    return db > da ? 1 : db < da ? -1 : 0;
+  });
+
+  // Reconstruct running balance working backwards from current balance
+  // current balance = balance AFTER the most recent transaction
+  var accId = sorted.length > 0 ? sorted[0]._account : null;
+  var currentBalance = (state.balances && state.balances.nationwide && accId && state.balances.nationwide[accId] !== undefined)
+    ? state.balances.nationwide[accId] : null;
+
+  var runningBal = currentBalance;
+  var balances = [];
+  for (var i = 0; i < sorted.length; i++) {
+    if (runningBal !== null) {
+      balances.push(runningBal);
+      var amt = parseFloat(sorted[i].transactionAmount ? sorted[i].transactionAmount.amount : 0);
+      runningBal = Math.round((runningBal - amt) * 100) / 100;
+    } else {
+      balances.push(null);
+    }
+  }
+
+  var currentBalStr = currentBalance !== null ? '\u00a3' + currentBalance.toFixed(2) : '';
   var header = [
     '"Account Name:","FlexDirect Account"',
-    '"Account Balance:",""',
-    '"Available Balance: ",""',
+    '"Account Balance:","' + currentBalStr + '"',
+    '"Available Balance: ","' + currentBalStr + '"',
     ''
   ];
-  var rows = [['Date','Transaction type','Description','Paid out','Paid in','Balance']];
-  for (var i = 0; i < txns.length; i++) {
-    var t = txns[i];
-    var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
-    var paidOut = amount < 0 ? '£' + Math.abs(amount).toFixed(2) : '';
-    var paidIn  = amount >= 0 ? '£' + amount.toFixed(2) : '';
 
-    // Derive transaction type from description text
+  var rows = [['Date','Transaction type','Description','Paid out','Paid in','Balance']];
+  for (var i = 0; i < sorted.length; i++) {
+    var t = sorted[i];
+    var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
+    var paidOut = amount < 0 ? '\u00a3' + Math.abs(amount).toFixed(2) : '';
+    var paidIn  = amount >= 0 ? '\u00a3' + amount.toFixed(2) : '';
+    var balStr  = balances[i] !== null ? '\u00a3' + balances[i].toFixed(2) : '';
     var raw = (t.remittanceInformationUnstructured || t.remittanceInformationStructured || '').toLowerCase();
     var txType;
     if (amount < 0) {
       if (raw.indexOf('direct debit') !== -1) txType = 'Direct debit';
       else if (raw.indexOf('visa') !== -1 || raw.indexOf('purchase') !== -1) txType = 'Visa purchase';
-      else if (raw.indexOf('payment to') !== -1) txType = 'Payment to';
-      else if (raw.indexOf('transfer') !== -1) txType = 'Payment to';
+      else if (raw.indexOf('payment to') !== -1 || raw.indexOf('transfer') !== -1) txType = 'Payment to';
       else if (raw.indexOf('atm') !== -1 || raw.indexOf('withdrawal') !== -1) txType = 'ATM Withdrawal NATIONWIDE';
       else if (raw.indexOf('cash') !== -1) txType = 'Cash withdrawal';
       else if (raw.indexOf('foreign currency') !== -1 || raw.indexOf('fx fee') !== -1) txType = 'Foreign currency transaction fee';
@@ -606,18 +648,8 @@ function nationwideToCSV(txns) {
       else if (raw.indexOf('cash credit') !== -1) txType = 'Cash credit';
       else txType = 'Bank credit';
     }
-
-    // Description: prefer creditor/debtor name, fall back to remittance info
     var description = t.creditorName || t.debtorName || t.remittanceInformationUnstructured || t.remittanceInformationStructured || '';
-
-    rows.push([
-      formatNationwideDate(t.bookingDate || t.valueDate || ''),
-      txType,
-      description,
-      paidOut,
-      paidIn,
-      '' // Running balance not available from GoCardless
-    ]);
+    rows.push([formatNationwideDate(t.bookingDate || t.valueDate || ''), txType, description, paidOut, paidIn, balStr]);
   }
   var dataRows = rows.map(function(r) { return r.map(esc).join(','); }).join('\n');
   return header.join('\n') + '\n' + dataRows;
