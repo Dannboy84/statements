@@ -589,6 +589,780 @@ function nationwideToCSV(txns) {
   return rows.map(function(r) { return r.map(esc).join(','); }).join('\n');
 }
 
+function formatTescoDate(d) {
+  // Convert YYYY-MM-DD to DD/MM/YYYY
+  if (!d) return '';
+  var parts = d.split('-');
+  if (parts.length === 3) return parts[2] + '/' + parts[1] + '/' + parts[0];
+  return d;
+}
+
+function tescoToCSV(txns) {
+  var rows = [['Transaction Date','Posting Date','Billing Amount','Merchant','Merchant City','Merchant County','Merchant Postal Code','Reference Number','Debit/Credit Flag','SICMCC Code']];
+  for (var i = 0; i < txns.length; i++) {
+    var t = txns[i];
+    var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
+    var debitCredit = amount < 0 ? 'Debit' : 'Credit';
+    // Always show as positive with GBP symbol to match native Tesco format
+    var billingAmount = '£' + Math.abs(amount).toFixed(2);
+    var merchant = t.creditorName || t.debtorName || t.remittanceInformationUnstructured || '';
+    // Use Tesco's own reference number from endToEndId (the long numeric string)
+    var ref = t.endToEndId || t.internalTransactionId || t.transactionId || '';
+    // SIC/MCC code from bank transaction code
+    var sicCode = '';
+    if (t.proprietaryBankTransactionCode && t.proprietaryBankTransactionCode.code) {
+      sicCode = t.proprietaryBankTransactionCode.code;
+    } else if (t.bankTransactionCode && t.bankTransactionCode.subFamily && t.bankTransactionCode.subFamily.code) {
+      sicCode = t.bankTransactionCode.subFamily.code;
+    }
+    var txDate = formatTescoDate(t.bookingDate || t.valueDate || '');
+    var postDate = formatTescoDate(t.valueDate || t.bookingDate || '');
+    rows.push([txDate, postDate, billingAmount, merchant, '', '', '', ref, debitCredit, sicCode]);
+  }
+  return rows.map(function(r) { return r.map(esc).join(','); }).join('\n');
+}
+
+function genericToCSV(txns) {
+  var rows = [['Date','Amount','Currency','Description','Creditor','Debtor','Reference','Status','Account']];
+  for (var i = 0; i < txns.length; i++) {
+    var t = txns[i];
+    rows.push([
+      t.bookingDate || t.valueDate || '',
+      t.transactionAmount ? t.transactionAmount.amount : '',
+      t.transactionAmount ? t.transactionAmount.currency : '',
+      t.remittanceInformationUnstructured || t.remittanceInformationStructured || '',
+      t.creditorName || '', t.debtorName || '',
+      t.endToEndId || t.internalTransactionId || '',
+      t.status || 'booked', t._account || ''
+    ]);
+  }
+  return rows.map(function(r) { return r.map(esc).join(','); }).join('\n');
+}
+
+function getCSV(bankId, txns) {
+  if (bankId === 'nationwide') return nationwideToCSV(txns);
+  if (bankId === 'tesco') return tescoToCSV(txns);
+  return genericToCSV(txns);
+}
+
+function downloadCSV(bankId) {
+  var dateFrom = document.getElementById('dateFrom').value;
+  var dateTo   = document.getElementById('dateTo').value;
+  var txns, filename, csv;
+
+  if (bankId === 'all') {
+    txns = (state.transactions.nationwide || []).concat(state.transactions.tesco || []);
+    filename = 'all-statements-' + dateFrom + '-to-' + dateTo + '.csv';
+    csv = genericToCSV(txns);
+  } else {
+    txns = state.transactions[bankId] || [];
+    filename = bankId + '-statements-' + dateFrom + '-to-' + dateTo + '.csv';
+    csv = getCSV(bankId, txns);
+  }
+
+  log(bankId + ': ' + txns.length + ' transactions in memory.', 'info');
+
+  if (!txns.length) {
+    log('No transactions for ' + bankId + '. Click Fetch All Banks first.', 'warn');
+    return;
+  }
+
+  var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function() { document.body.removeChild(a); URL.revokeObjectURL(url); }, 1000);
+  log('Downloaded: ' + filename + ' (' + txns.length + ' rows)', 'ok');
+}
+
+// ── Google Drive ──────────────────────────────────────────────────────────────
+function connectDrive() {
+  var clientId = state.config.driveClientId;
+  if (!clientId) { log('Enter your Google Drive OAuth Client ID in Config first.', 'warn'); return; }
+  var scope = 'https://www.googleapis.com/auth/drive.file';
+  var authUrl = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=' + encodeURIComponent(clientId) + '&redirect_uri=' + encodeURIComponent(state.config.redirectUri) + '&response_type=token&scope=' + encodeURIComponent(scope);
+  var popup = window.open(authUrl, 'drive_auth', 'width=500,height=600');
+  var poll = setInterval(function() {
+    try {
+      if (popup.location.href.indexOf('access_token') !== -1) {
+        var params = new URLSearchParams(popup.location.hash.substring(1));
+        state.tokens.drive = params.get('access_token');
+        document.getElementById('driveStatus').style.display = 'inline';
+        document.getElementById('driveConnectBtn').textContent = 'Reconnect Drive';
+        log('Google Drive connected.', 'ok');
+        clearInterval(poll);
+        popup.close();
+      }
+    } catch(e) {}
+    if (popup && popup.closed) clearInterval(poll);
+  }, 500);
+}
+
+async function saveToDrive() {
+  if (!state.tokens.drive) { log('Connect Google Drive first.', 'warn'); connectDrive(); return; }
+  var dateFrom = document.getElementById('dateFrom').value;
+  var dateTo   = document.getElementById('dateTo').value;
+  var banks = ['nationwide','tesco'].filter(function(b) { return state.transactions[b] && state.transactions[b].length > 0; });
+  if (!banks.length) { log('No transactions to save. Fetch first.', 'warn'); return; }
+  log('Saving to Google Drive...', 'info');
+  var folderId = await getOrCreateDriveFolder('Bank Statements');
+  if (!folderId) { log('Could not create Drive folder.', 'err'); return; }
+  for (var i = 0; i < banks.length; i++) {
+    var b = banks[i];
+    await uploadFileToDrive(b + '-statements-' + dateFrom + '-to-' + dateTo + '.csv', getCSV(b, state.transactions[b]), folderId);
+  }
+  var all = (state.transactions.nationwide || []).concat(state.transactions.tesco || []);
+  if (all.length) await uploadFileToDrive('all-statements-' + dateFrom + '-to-' + dateTo + '.csv', genericToCSV(all), folderId);
+  log('All files saved to Google Drive -> Bank Statements/', 'ok');
+}
+
+async function getOrCreateDriveFolder(name) {
+  var search = await fetch("https://www.googleapis.com/drive/v3/files?q=name='" + name + "' and mimeType='application/vnd.google-apps.folder' and trashed=false&fields=files(id,name)", { headers: { 'Authorization': 'Bearer ' + state.tokens.drive } });
+  var data = await search.json();
+  if (data.files && data.files[0]) return data.files[0].id;
+  var create = await fetch('https://www.googleapis.com/drive/v3/files', { method: 'POST', headers: { 'Authorization': 'Bearer ' + state.tokens.drive, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name, mimeType: 'application/vnd.google-apps.folder' }) });
+  var folder = await create.json();
+  return folder.id;
+}
+
+async function uploadFileToDrive(filename, content, folderId) {
+  var form = new FormData();
+  form.append('metadata', new Blob([JSON.stringify({ name: filename, parents: [folderId] })], { type: 'application/json' }));
+  form.append('file', new Blob([content], { type: 'text/csv' }));
+  var res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', { method: 'POST', headers: { 'Authorization': 'Bearer ' + state.tokens.drive }, body: form });
+  var data = await res.json();
+  if (data.id) log('Uploaded: ' + filename, 'ok');
+  else log('Drive upload failed: ' + JSON.stringify(data), 'err');
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function init() {
+  var token = await getGCToken();
+  if (!token) return;
+  await lookupAllInstitutionIds();
+  for (var i = 0; i < ['nationwide','tesco'].length; i++) {
+    var bankId = ['nationwide','tesco'][i];
+    var reqId = localStorage.getItem('req_' + bankId);
+    if (reqId) {
+      state.requisitions[bankId] = reqId;
+      log('Resuming ' + bankId + '...', 'info');
+      await loadAccounts(bankId);
+    }
+  }
+}
+
+// Default date range — last 3 months
+var today = new Date();
+var threeAgo = new Date(); threeAgo.setMonth(today.getMonth() - 3);
+document.getElementById('dateTo').value   = today.toISOString().split('T')[0];
+document.getElementById('dateFrom').value = threeAgo.toISOString().split('T')[0];
+
+// On page load
+window.addEventListener('load', function() {
+  var restored = loadSavedConfig();
+  if (restored && state.config.secretId && state.config.secretKey) {
+    init();
+  } else {
+    log('Enter your credentials and click Save Config to begin.', 'warn');
+  }
+});
+</script>
+</body>
+</html><!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Statement Vault</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,700;1,9..144,300&display=swap" rel="stylesheet"/>
+<style>
+  :root {
+    --bg: #0d0f0e; --surface: #141714; --border: #252825;
+    --border-light: #2e322e; --text: #e8ede9; --muted: #6b7a6d;
+    --accent: #a8f0a0; --accent-dim: #2a3d2b;
+    --nationwide-light: #4a8fe8; --tesco-light: #ff6b7a;
+    --warning: #f0c060; --success: #a8f0a0; --radius: 12px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'DM Mono', monospace; font-size: 13px; min-height: 100vh; overflow-x: hidden; }
+  body::before { content: ''; position: fixed; inset: 0; background-image: linear-gradient(var(--border) 1px, transparent 1px), linear-gradient(90deg, var(--border) 1px, transparent 1px); background-size: 40px 40px; opacity: 0.3; pointer-events: none; z-index: 0; }
+  .container { position: relative; z-index: 1; max-width: 860px; margin: 0 auto; padding: 48px 24px 80px; }
+  header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 52px; }
+  .wordmark { font-family: 'Fraunces', serif; font-size: 28px; font-weight: 300; letter-spacing: -0.5px; color: var(--accent); }
+  .wordmark span { font-style: italic; }
+  .badge { font-size: 10px; padding: 3px 8px; border: 1px solid var(--border-light); border-radius: 100px; color: var(--muted); margin-top: 6px; }
+  .setup-panel { background: var(--surface); border: 1px solid var(--border-light); border-radius: var(--radius); padding: 28px; margin-bottom: 32px; }
+  .panel-title { font-family: 'Fraunces', serif; font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--muted); margin-bottom: 20px; }
+  .fields-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 20px; }
+  @media (max-width: 600px) { .fields-grid { grid-template-columns: 1fr; } }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field.full { grid-column: 1 / -1; }
+  label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+  input, select { background: var(--bg); border: 1px solid var(--border-light); border-radius: 8px; color: var(--text); font-family: 'DM Mono', monospace; font-size: 12px; padding: 10px 12px; outline: none; transition: border-color 0.2s; width: 100%; }
+  input:focus, select:focus { border-color: var(--accent); }
+  input::placeholder { color: var(--muted); }
+  select option { background: #1a1e1a; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; border: none; border-radius: 8px; cursor: pointer; font-family: 'DM Mono', monospace; font-size: 12px; padding: 10px 18px; transition: all 0.2s; font-weight: 500; }
+  .btn-primary { background: var(--accent); color: #0a1a0a; }
+  .btn-primary:hover { background: #c0f8b8; transform: translateY(-1px); }
+  .btn-ghost { background: transparent; color: var(--text); border: 1px solid var(--border-light); }
+  .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+  .btn-sm { padding: 7px 12px; font-size: 11px; }
+  .banks-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 32px; }
+  @media (max-width: 600px) { .banks-grid { grid-template-columns: 1fr; } }
+  .bank-card { background: var(--surface); border: 1px solid var(--border-light); border-radius: var(--radius); padding: 24px; position: relative; overflow: hidden; transition: border-color 0.2s; }
+  .bank-card.connected { border-color: var(--accent-dim); }
+  .bank-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; }
+  .bank-card.nationwide::before { background: var(--nationwide-light); }
+  .bank-card.tesco::before { background: var(--tesco-light); }
+  .bank-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .bank-icon { width: 40px; height: 40px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: bold; }
+  .nationwide .bank-icon { background: #1a3a6b; color: var(--nationwide-light); }
+  .tesco .bank-icon { background: #2a0a0e; color: var(--tesco-light); }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border-light); }
+  .status-dot.connected { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  .status-dot.loading { background: var(--warning); animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .bank-name { font-family: 'Fraunces', serif; font-size: 18px; font-weight: 300; margin-bottom: 4px; }
+  .bank-meta { color: var(--muted); font-size: 11px; margin-bottom: 16px; }
+  .bank-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .accounts-list { margin-top: 14px; display: none; }
+  .account-item { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; }
+  .account-name { font-size: 11px; color: var(--text); }
+  .account-balance { font-size: 11px; color: var(--accent); }
+  .log-panel { background: var(--surface); border: 1px solid var(--border-light); border-radius: var(--radius); overflow: hidden; margin-bottom: 24px; }
+  .log-header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  .log-body { padding: 16px 20px; max-height: 240px; overflow-y: auto; font-size: 11px; line-height: 1.8; }
+  .log-body::-webkit-scrollbar { width: 4px; }
+  .log-body::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 2px; }
+  .log-line { display: flex; gap: 12px; align-items: flex-start; }
+  .log-time { color: var(--muted); flex-shrink: 0; }
+  .log-line.ok .log-msg { color: var(--success); }
+  .log-line.info .log-msg { color: var(--text); }
+  .log-line.warn .log-msg { color: var(--warning); }
+  .log-line.err .log-msg { color: var(--tesco-light); }
+  .fetch-panel { background: var(--surface); border: 1px solid var(--border-light); border-radius: var(--radius); padding: 24px; margin-bottom: 20px; }
+  .date-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 16px; }
+  .date-row .field { flex: 1; min-width: 140px; }
+  .export-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+  .progress-bar { height: 2px; background: var(--border); border-radius: 2px; overflow: hidden; margin-bottom: 6px; display: none; }
+  .progress-fill { height: 100%; background: var(--accent); border-radius: 2px; width: 0%; transition: width 0.4s ease; }
+  .progress-label { font-size: 10px; color: var(--muted); margin-bottom: 8px; display: none; }
+  .modal-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,0.75); display: flex; align-items: center; justify-content: center; padding: 24px; opacity: 0; pointer-events: none; transition: opacity 0.2s; }
+  .modal-overlay.open { opacity: 1; pointer-events: all; }
+  .modal { background: var(--surface); border: 1px solid var(--border-light); border-radius: 16px; padding: 32px; max-width: 440px; width: 100%; transform: translateY(8px); transition: transform 0.2s; }
+  .modal-overlay.open .modal { transform: translateY(0); }
+  .modal h2 { font-family: 'Fraunces', serif; font-size: 20px; font-weight: 300; margin-bottom: 8px; }
+  .modal p { color: var(--muted); font-size: 12px; line-height: 1.6; margin-bottom: 20px; }
+  .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+  .info-box { background: var(--accent-dim); border: 1px solid #3a5a3b; border-radius: 8px; padding: 12px 14px; font-size: 11px; color: #b8e8ba; line-height: 1.6; margin-bottom: 20px; }
+  .info-box strong { color: var(--accent); }
+  .steps-list { list-style: none; counter-reset: steps; }
+  .steps-list li { counter-increment: steps; padding: 10px 0 10px 32px; position: relative; color: var(--muted); font-size: 11px; border-bottom: 1px solid var(--border); }
+  .steps-list li:last-child { border: none; }
+  .steps-list li::before { content: counter(steps); position: absolute; left: 0; top: 10px; width: 20px; height: 20px; background: var(--border-light); border-radius: 50%; font-size: 10px; color: var(--accent); line-height: 20px; text-align: center; }
+  .steps-list li strong { color: var(--text); }
+  .tabs { display: flex; gap: 4px; margin-bottom: 20px; }
+  .tab { padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 11px; border: 1px solid transparent; color: var(--muted); transition: all 0.15s; }
+  .tab.active { background: var(--accent-dim); border-color: #3a5a3b; color: var(--accent); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div>
+      <div class="wordmark">Statement <span>Vault</span></div>
+      <div style="color:var(--muted);font-size:11px;margin-top:4px;">GoCardless Open Banking · UK</div>
+    </div>
+    <div class="badge">PRODUCTION</div>
+  </header>
+
+  <div class="setup-panel">
+    <div class="panel-title">Setup & Configuration</div>
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('config')">Config</div>
+      <div class="tab" onclick="switchTab('instructions')">How It Works</div>
+      <div class="tab" onclick="switchTab('gdrive')">Google Drive</div>
+    </div>
+    <div class="tab-content active" id="tab-config">
+      <div class="fields-grid">
+        <div class="field">
+          <label>GoCardless Secret ID</label>
+          <input type="text" id="gcSecretId" placeholder="your-secret-id"/>
+        </div>
+        <div class="field">
+          <label>GoCardless Secret Key</label>
+          <input type="password" id="gcSecretKey" placeholder="your-secret-key"/>
+        </div>
+        <div class="field">
+          <label>Environment</label>
+          <select id="gcEnv">
+            <option value="sandbox">Sandbox (Testing)</option>
+            <option value="production" selected>Production</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Redirect URI (your Railway URL)</label>
+          <input type="text" id="redirectUri" placeholder="https://your-app.up.railway.app"/>
+        </div>
+        <div class="field full">
+          <label>Google Drive OAuth Client ID</label>
+          <input type="text" id="driveClientId" placeholder="xxx.apps.googleusercontent.com"/>
+        </div>
+      </div>
+      <button class="btn btn-primary" onclick="saveConfig()">Save Config</button>
+    </div>
+    <div class="tab-content" id="tab-instructions">
+      <ol class="steps-list">
+        <li><strong>Enter credentials</strong> and click Save Config.</li>
+        <li><strong>Connect each bank</strong> — click Connect, complete the bank login in the popup.</li>
+        <li><strong>Fetch transactions</strong> — set a date range and click Fetch All Banks.</li>
+        <li><strong>Download</strong> as CSV or save to Google Drive.</li>
+      </ol>
+    </div>
+    <div class="tab-content" id="tab-gdrive">
+      <div class="info-box"><strong>Google Drive</strong> requires a GCP project with Drive API enabled and OAuth 2.0 credentials.</div>
+      <ol class="steps-list">
+        <li>Go to <strong>console.cloud.google.com</strong> and enable the Google Drive API</li>
+        <li>Create OAuth 2.0 Client ID (Web application) with your Railway URL as authorised origin and redirect URI</li>
+        <li>Paste the Client ID in Config above</li>
+        <li>Click Connect Google Drive below</li>
+      </ol>
+      <button class="btn btn-ghost" onclick="connectDrive()" id="driveConnectBtn">Connect Google Drive</button>
+      <span id="driveStatus" style="display:none;margin-left:12px;font-size:11px;color:var(--accent);">Connected</span>
+    </div>
+  </div>
+
+  <div class="banks-grid">
+    <div class="bank-card nationwide" id="card-nationwide">
+      <div class="bank-header">
+        <div class="bank-icon">N</div>
+        <div class="status-dot" id="dot-nationwide"></div>
+      </div>
+      <div class="bank-name">Nationwide</div>
+      <div class="bank-meta" id="meta-nationwide">Building Society</div>
+      <div class="bank-actions">
+        <button class="btn btn-ghost btn-sm" onclick="connectBank('nationwide','Nationwide')">Connect</button>
+        <button class="btn btn-ghost btn-sm" onclick="refreshAccounts('nationwide')">Refresh</button>
+      </div>
+      <div class="accounts-list" id="accounts-nationwide"></div>
+    </div>
+    <div class="bank-card tesco" id="card-tesco">
+      <div class="bank-header">
+        <div class="bank-icon">T</div>
+        <div class="status-dot" id="dot-tesco"></div>
+      </div>
+      <div class="bank-name">Tesco Bank</div>
+      <div class="bank-meta" id="meta-tesco">Credit Card</div>
+      <div class="bank-actions">
+        <button class="btn btn-ghost btn-sm" onclick="connectBank('tesco','Tesco')">Connect</button>
+        <button class="btn btn-ghost btn-sm" onclick="refreshAccounts('tesco')">Refresh</button>
+      </div>
+      <div class="accounts-list" id="accounts-tesco"></div>
+    </div>
+  </div>
+
+  <div class="fetch-panel">
+    <div style="font-family:'Fraunces',serif;font-size:16px;font-weight:300;margin-bottom:16px;">Fetch Transactions</div>
+    <div class="date-row">
+      <div class="field"><label>Date From</label><input type="date" id="dateFrom"/></div>
+      <div class="field"><label>Date To</label><input type="date" id="dateTo"/></div>
+      <button class="btn btn-primary" onclick="fetchAll()">Fetch All Banks</button>
+    </div>
+    <div class="progress-bar" id="progressBar"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="progress-label" id="progressLabel"></div>
+    <div class="export-row">
+      <button class="btn btn-ghost btn-sm" onclick="downloadCSV('nationwide')">Nationwide CSV</button>
+      <button class="btn btn-ghost btn-sm" onclick="downloadCSV('tesco')">Tesco CSV</button>
+      <button class="btn btn-ghost btn-sm" onclick="downloadCSV('all')">Combined CSV</button>
+      <span style="flex:1"></span>
+      <button class="btn btn-primary btn-sm" onclick="saveToDrive()">Save to Google Drive</button>
+    </div>
+  </div>
+
+  <div class="log-panel">
+    <div class="log-header">
+      <span style="font-size:11px;color:var(--muted);">Activity Log</span>
+      <button class="btn btn-ghost btn-sm" onclick="clearLog()">Clear</button>
+    </div>
+    <div class="log-body" id="logBody">
+      <div class="log-line info"><span class="log-time">--:--:--</span><span class="log-msg">Statement Vault initialised.</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <h2 id="modalTitle">Connect Bank</h2>
+    <p id="modalBody">You will be redirected to GoCardless to authenticate with your bank.</p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="modalConfirm">Continue</button>
+    </div>
+  </div>
+</div>
+
+<script>
+var state = {
+  config: { secretId: '', secretKey: '', env: 'production', redirectUri: '', driveClientId: '' },
+  tokens: { gocardless: null, drive: null },
+  institutionIds: { nationwide: null, tesco: null },
+  requisitions: { nationwide: null, tesco: null },
+  accounts: { nationwide: [], tesco: [] },
+  transactions: { nationwide: [], tesco: [] }
+};
+
+function gcBase() { return window.location.origin + '/api'; }
+
+// ── Logging ──────────────────────────────────────────────────────────────────
+function log(msg, type) {
+  type = type || 'info';
+  var now = new Date().toLocaleTimeString('en-GB');
+  var el = document.createElement('div');
+  el.className = 'log-line ' + type;
+  el.innerHTML = '<span class="log-time">' + now + '</span><span class="log-msg">' + msg + '</span>';
+  var body = document.getElementById('logBody');
+  body.appendChild(el);
+  body.scrollTop = body.scrollHeight;
+}
+function clearLog() { document.getElementById('logBody').innerHTML = ''; }
+
+// ── Tabs ─────────────────────────────────────────────────────────────────────
+function switchTab(id) {
+  var ids = ['config','instructions','gdrive'];
+  var tabs = document.querySelectorAll('.tab');
+  var contents = document.querySelectorAll('.tab-content');
+  for (var i = 0; i < tabs.length; i++) {
+    tabs[i].classList.toggle('active', ids[i] === id);
+    contents[i].classList.toggle('active', ids[i] === id);
+  }
+}
+
+// ── Modal ────────────────────────────────────────────────────────────────────
+function openModal(title, body, onConfirm) {
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('modalBody').textContent = body;
+  document.getElementById('modalConfirm').onclick = function() { closeModal(); onConfirm(); };
+  document.getElementById('modal').classList.add('open');
+}
+function closeModal() { document.getElementById('modal').classList.remove('open'); }
+
+// ── Progress ─────────────────────────────────────────────────────────────────
+function setProgress(pct, label) {
+  document.getElementById('progressBar').style.display = 'block';
+  document.getElementById('progressLabel').style.display = 'block';
+  document.getElementById('progressFill').style.width = pct + '%';
+  document.getElementById('progressLabel').textContent = label;
+}
+function hideProgress() {
+  document.getElementById('progressBar').style.display = 'none';
+  document.getElementById('progressLabel').style.display = 'none';
+}
+
+// ── Dot ──────────────────────────────────────────────────────────────────────
+function setDot(bankId, status) {
+  var dot = document.getElementById('dot-' + bankId);
+  dot.className = 'status-dot' + (status !== 'none' ? ' ' + status : '');
+}
+
+// ── Config ────────────────────────────────────────────────────────────────────
+function saveConfig() {
+  state.config.secretId    = document.getElementById('gcSecretId').value.trim();
+  state.config.secretKey   = document.getElementById('gcSecretKey').value.trim();
+  state.config.env         = document.getElementById('gcEnv').value;
+  state.config.redirectUri = document.getElementById('redirectUri').value.trim();
+  state.config.driveClientId = document.getElementById('driveClientId').value.trim();
+  localStorage.setItem('sv_config', JSON.stringify(state.config));
+  log('Configuration saved.', 'ok');
+  init();
+}
+
+function loadSavedConfig() {
+  var saved = localStorage.getItem('sv_config');
+  if (!saved) return false;
+  try {
+    var c = JSON.parse(saved);
+    state.config = c;
+    document.getElementById('gcSecretId').value    = c.secretId    || '';
+    document.getElementById('gcSecretKey').value   = c.secretKey   || '';
+    document.getElementById('gcEnv').value         = c.env         || 'production';
+    document.getElementById('redirectUri').value   = c.redirectUri || '';
+    document.getElementById('driveClientId').value = c.driveClientId || '';
+    return true;
+  } catch(e) {
+    log('Could not restore config: ' + e.message, 'warn');
+    return false;
+  }
+}
+
+// ── GoCardless Auth ───────────────────────────────────────────────────────────
+async function getGCToken() {
+  if (!state.config.secretId || !state.config.secretKey) {
+    log('Missing credentials. Enter your GoCardless Secret ID and Key then click Save Config.', 'warn');
+    return null;
+  }
+  try {
+    log('Authenticating with GoCardless...', 'info');
+    var res = await fetch(gcBase() + '/token/new/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ secret_id: state.config.secretId, secret_key: state.config.secretKey })
+    });
+    var data = await res.json();
+    if (data.access) {
+      state.tokens.gocardless = data.access;
+      log('GoCardless token obtained.', 'ok');
+      return data.access;
+    }
+    log('GoCardless auth failed: ' + JSON.stringify(data), 'err');
+    return null;
+  } catch(e) {
+    log('GoCardless auth error: ' + e.message, 'err');
+    return null;
+  }
+}
+
+function gcHeaders() {
+  return {
+    'Authorization': 'Bearer ' + state.tokens.gocardless,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json'
+  };
+}
+
+// ── Institution IDs ───────────────────────────────────────────────────────────
+async function lookupInstitutionId(searchName) {
+  try {
+    var res = await fetch(gcBase() + '/institutions/?country=gb', { headers: gcHeaders() });
+    var data = await res.json();
+    if (!Array.isArray(data)) { log('Institution lookup failed: ' + JSON.stringify(data), 'err'); return null; }
+    var match = data.find(function(i) { return i.name.toLowerCase().indexOf(searchName.toLowerCase()) !== -1; });
+    if (match) { log('Found: ' + match.name + ' -> ' + match.id, 'info'); return match.id; }
+    log('Could not find institution: ' + searchName, 'warn');
+    return null;
+  } catch(e) {
+    log('Institution lookup error: ' + e.message, 'err');
+    return null;
+  }
+}
+
+async function lookupAllInstitutionIds() {
+  var nwId = await lookupInstitutionId('Nationwide');
+  if (nwId) { state.institutionIds.nationwide = nwId; document.getElementById('meta-nationwide').textContent = 'Building Society · ' + nwId; }
+  var tId = await lookupInstitutionId('Tesco');
+  if (tId) { state.institutionIds.tesco = tId; document.getElementById('meta-tesco').textContent = 'Credit Card · ' + tId; }
+}
+
+// ── Connect Bank ──────────────────────────────────────────────────────────────
+function connectBank(bankId, searchName) {
+  openModal(
+    'Connect ' + (bankId === 'nationwide' ? 'Nationwide' : 'Tesco Bank'),
+    "You'll be redirected to GoCardless's secure Open Banking portal. This uses the official bank login — no credentials are stored here.",
+    function() { doConnectBank(bankId, searchName); }
+  );
+}
+
+async function doConnectBank(bankId, searchName) {
+  setDot(bankId, 'loading');
+  var token = state.tokens.gocardless || await getGCToken();
+  if (!token) { setDot(bankId, 'none'); return; }
+
+  var institutionId = state.institutionIds[bankId];
+  if (!institutionId) {
+    institutionId = await lookupInstitutionId(searchName);
+    if (!institutionId) { setDot(bankId, 'none'); return; }
+    state.institutionIds[bankId] = institutionId;
+  }
+
+  if (!state.config.redirectUri) {
+    log('Please set your Redirect URI (your Railway URL) in the Config tab.', 'err');
+    setDot(bankId, 'none');
+    return;
+  }
+
+  try {
+    log('Creating requisition for ' + institutionId + '...', 'info');
+    var res = await fetch(gcBase() + '/requisitions/', {
+      method: 'POST',
+      headers: gcHeaders(),
+      body: JSON.stringify({
+        redirect: state.config.redirectUri,
+        institution_id: institutionId,
+        reference: 'sv-' + bankId + '-' + Date.now(),
+        user_language: 'EN'
+      })
+    });
+    var data = await res.json();
+    if (data.link) {
+      state.requisitions[bankId] = data.id;
+      localStorage.setItem('req_' + bankId, data.id);
+      log('Opening bank auth...', 'ok');
+      var popup = window.open(data.link, 'gc_auth_' + bankId, 'width=600,height=700,scrollbars=yes');
+      var pollTimer = setInterval(async function() {
+        if (popup && popup.closed) {
+          clearInterval(pollTimer);
+          log('Auth window closed. Loading accounts...', 'info');
+          await loadAccounts(bankId);
+        }
+      }, 1000);
+    } else {
+      log('Failed to create requisition: ' + JSON.stringify(data), 'err');
+      setDot(bankId, 'none');
+    }
+  } catch(e) {
+    log('Error connecting ' + bankId + ': ' + e.message, 'err');
+    setDot(bankId, 'none');
+  }
+}
+
+// ── Load Accounts ─────────────────────────────────────────────────────────────
+async function loadAccounts(bankId) {
+  var reqId = state.requisitions[bankId] || localStorage.getItem('req_' + bankId);
+  if (!reqId) { log('No requisition for ' + bankId + '. Please click Connect.', 'warn'); return; }
+  state.requisitions[bankId] = reqId;
+
+  var token = state.tokens.gocardless || await getGCToken();
+  if (!token) return;
+
+  try {
+    log('[' + bankId + '] Checking requisition ' + reqId.slice(0,8) + '...', 'info');
+    var res = await fetch(gcBase() + '/requisitions/' + reqId + '/', { headers: gcHeaders() });
+    var data = await res.json();
+    log('[' + bankId + '] Status: ' + data.status + ' | accounts: ' + (data.accounts ? data.accounts.length : 0), 'info');
+
+    if (data.accounts && data.accounts.length > 0) {
+      state.accounts[bankId] = data.accounts;
+      setDot(bankId, 'connected');
+      document.getElementById('card-' + bankId).classList.add('connected');
+      log(bankId + ': ' + data.accounts.length + ' account(s) connected.', 'ok');
+      renderAccounts(bankId, data.accounts);
+    } else if (data.status === 'LN' || data.status === 'EX' || data.status === 'RJ') {
+      log('[' + bankId + '] Requisition expired (status: ' + data.status + '). Please click Connect again.', 'warn');
+      localStorage.removeItem('req_' + bankId);
+      state.requisitions[bankId] = null;
+      setDot(bankId, 'none');
+    } else {
+      log('[' + bankId + '] No accounts yet (status: ' + data.status + '). Try clicking Refresh after completing bank login.', 'warn');
+      setDot(bankId, 'none');
+    }
+  } catch(e) {
+    log('Error loading accounts for ' + bankId + ': ' + e.message, 'err');
+    setDot(bankId, 'none');
+  }
+}
+
+async function refreshAccounts(bankId) {
+  var token = state.tokens.gocardless || await getGCToken();
+  if (!token) return;
+  await loadAccounts(bankId);
+}
+
+async function renderAccounts(bankId, accountIds) {
+  var container = document.getElementById('accounts-' + bankId);
+  container.style.display = 'block';
+  container.innerHTML = '<div style="font-size:10px;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:1px;">Accounts</div>';
+  for (var i = 0; i < accountIds.length; i++) {
+    var accId = accountIds[i];
+    try {
+      var detailsRes = await fetch(gcBase() + '/accounts/' + accId + '/details/', { headers: gcHeaders() });
+      var balRes = await fetch(gcBase() + '/accounts/' + accId + '/balances/', { headers: gcHeaders() });
+      var details = await detailsRes.json();
+      var bals = await balRes.json();
+      var acc = details.account || {};
+      var bal = bals.balances && bals.balances[0] ? bals.balances[0].balanceAmount : null;
+      var item = document.createElement('div');
+      item.className = 'account-item';
+      item.innerHTML = '<div><div class="account-name">' + (acc.name || acc.product || (acc.iban ? acc.iban.slice(-4) : accId.slice(0,8))) + '</div><div style="font-size:10px;color:var(--muted)">' + (acc.iban || acc.currency || '') + '</div></div>' + (bal ? '<div class="account-balance">' + parseFloat(bal.amount).toFixed(2) + ' ' + bal.currency + '</div>' : '');
+      container.appendChild(item);
+    } catch(e) {
+      var item = document.createElement('div');
+      item.className = 'account-item';
+      item.innerHTML = '<div class="account-name">' + accId.slice(0,12) + '</div>';
+      container.appendChild(item);
+    }
+  }
+}
+
+// ── Fetch Transactions ────────────────────────────────────────────────────────
+async function fetchAll() {
+  var from = document.getElementById('dateFrom').value;
+  var to = document.getElementById('dateTo').value;
+  if (!from || !to) { log('Please select a date range.', 'warn'); return; }
+
+  var token = state.tokens.gocardless || await getGCToken();
+  if (!token) return;
+
+  var banks = ['nationwide', 'tesco'].filter(function(b) { return state.accounts[b].length > 0; });
+  if (banks.length === 0) { log('No banks connected. Click Connect on each bank first.', 'warn'); return; }
+
+  var totalFetched = 0;
+  var total = banks.reduce(function(s, b) { return s + state.accounts[b].length; }, 0);
+  var done = 0;
+
+  for (var bi = 0; bi < banks.length; bi++) {
+    var bankId = banks[bi];
+    state.transactions[bankId] = [];
+    for (var ai = 0; ai < state.accounts[bankId].length; ai++) {
+      var accId = state.accounts[bankId][ai];
+      setProgress(Math.round(done/total*80), 'Fetching ' + bankId + ' transactions...');
+      try {
+        var url = gcBase() + '/accounts/' + accId + '/transactions/?date_from=' + from + '&date_to=' + to;
+        var res = await fetch(url, { headers: gcHeaders() });
+        var data = await res.json();
+        var txns = (data.transactions ? (data.transactions.booked || []).concat(data.transactions.pending || []) : []);
+        for (var ti = 0; ti < txns.length; ti++) txns[ti]._account = accId;
+        state.transactions[bankId] = state.transactions[bankId].concat(txns);
+        totalFetched += txns.length;
+        log(bankId + ' (' + accId.slice(0,8) + '): ' + txns.length + ' transactions fetched.', 'ok');
+      } catch(e) {
+        log('Error fetching ' + bankId + ': ' + e.message, 'err');
+      }
+      done++;
+    }
+  }
+  setProgress(100, 'Done - ' + totalFetched + ' transactions fetched.');
+  setTimeout(hideProgress, 2000);
+  log('Total: ' + totalFetched + ' transactions fetched.', 'ok');
+}
+
+// ── CSV Formatters ────────────────────────────────────────────────────────────
+function esc(v) { return '"' + String(v || '').replace(/"/g, '""') + '"'; }
+
+function nationwideToCSV(txns) {
+  var rows = [['Date','Transaction type','Description','Paid out','Paid in','Balance']];
+  for (var i = 0; i < txns.length; i++) {
+    var t = txns[i];
+    var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
+    var paidOut = amount < 0 ? Math.abs(amount).toFixed(2) : '';
+    var paidIn  = amount >= 0 ? amount.toFixed(2) : '';
+    var desc = ((t.remittanceInformationUnstructured || t.remittanceInformationStructured || '')).toLowerCase();
+    var txType = 'Bank credit';
+    if (amount < 0) {
+      if (desc.indexOf('direct debit') !== -1) txType = 'Direct debit';
+      else if (desc.indexOf('visa') !== -1 || desc.indexOf('purchase') !== -1) txType = 'Visa purchase';
+      else if (desc.indexOf('payment to') !== -1 || desc.indexOf('transfer') !== -1) txType = 'Payment to';
+      else if (desc.indexOf('atm') !== -1 || desc.indexOf('withdrawal') !== -1) txType = 'ATM Withdrawal NATIONWIDE';
+      else if (desc.indexOf('cash') !== -1) txType = 'Cash withdrawal';
+      else if (desc.indexOf('foreign currency') !== -1 || desc.indexOf('fx fee') !== -1) txType = 'Foreign currency transaction fee';
+      else txType = 'Direct debit';
+    } else {
+      if (desc.indexOf('interest') !== -1) txType = 'Interest added';
+      else if (desc.indexOf('cash') !== -1) txType = 'Cash credit';
+      else txType = 'Bank credit';
+    }
+    var description = t.creditorName || t.debtorName || t.remittanceInformationUnstructured || t.remittanceInformationStructured || '';
+    rows.push([t.bookingDate || t.valueDate || '', txType, description, paidOut, paidIn, '']);
+  }
+  return rows.map(function(r) { return r.map(esc).join(','); }).join('\n');
+}
+
 function tescoToCSV(txns) {
   var rows = [['Transaction Date','Posting Date','Billing Amount','Merchant','Merchant City','Merchant County','Merchant Postal Code','Reference Number','Debit/Credit Flag','SIC/MCC Code']];
   for (var i = 0; i < txns.length; i++) {
