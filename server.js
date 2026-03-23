@@ -5,60 +5,45 @@
  */
 
 const express = require('express');
-const path = require('path');
-const cors = require('cors');
-const fs = require('fs');
+const https   = require('https');
+const path    = require('path');
+const cors    = require('cors');
+const fs      = require('fs');
 
-const app = express();
+const app  = express();
 const PORT = process.env.PORT || 3000;
-const GC_HOST = 'bankaccountdata.gocardless.com';
+const GC_HOST      = 'bankaccountdata.gocardless.com';
 const SESSION_FILE = path.join(__dirname, 'session.json');
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
 app.use(cors({
   origin: process.env.ALLOWED_ORIGIN || '*',
-  methods: ['GET', 'POST', 'OPTIONS'],
+  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
 }));
 
-app.use(express.json());
-
-// ── Session persistence ───────────────────────────────────────────────────────
-// Saves requisition IDs and extra banks server-side so any device can load them
-
+// ── Session routes (use JSON body parser ONLY here) ───────────────────────────
 function readSession() {
   try {
-    if (fs.existsSync(SESSION_FILE)) {
-      return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
-    }
-  } catch(e) {
-    console.error('Error reading session:', e.message);
-  }
+    if (fs.existsSync(SESSION_FILE)) return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
+  } catch(e) { console.error('Session read error:', e.message); }
   return {};
 }
-
 function writeSession(data) {
-  try {
-    fs.writeFileSync(SESSION_FILE, JSON.stringify(data, null, 2), 'utf8');
-  } catch(e) {
-    console.error('Error writing session:', e.message);
-  }
+  try { fs.writeFileSync(SESSION_FILE, JSON.stringify(data, null, 2), 'utf8'); }
+  catch(e) { console.error('Session write error:', e.message); }
 }
 
-// GET /session — load saved requisitions + extra banks
 app.get('/session', function(req, res) {
   res.json(readSession());
 });
 
-// POST /session — save requisitions + extra banks
-app.post('/session', function(req, res) {
-  var current = readSession();
-  var updated = Object.assign(current, req.body);
+app.post('/session', express.json(), function(req, res) {
+  var updated = Object.assign(readSession(), req.body);
   writeSession(updated);
   res.json({ ok: true });
 });
 
-// DELETE /session/:key — remove a single key (e.g. when removing a bank)
 app.delete('/session/:key', function(req, res) {
   var current = readSession();
   delete current[req.params.key];
@@ -67,56 +52,48 @@ app.delete('/session/:key', function(req, res) {
 });
 
 // ── GoCardless API Proxy ──────────────────────────────────────────────────────
-// Manual proxy with retry logic to handle ECONNRESET from Railway
-const https = require('https');
-
-app.use('/api', function(req, res) {
+// Use express.raw() so the body is NOT pre-parsed — we forward it as-is.
+app.use('/api', express.raw({ type: '*/*', limit: '10mb' }), function(req, res) {
   var gcPath = '/api/v2' + req.url;
-  console.log('-> GoCardless: ' + req.method + ' ' + gcPath);
+  var body   = req.body && req.body.length ? req.body : Buffer.alloc(0);
+  console.log('-> GoCardless: ' + req.method + ' ' + gcPath + ' (' + body.length + ' bytes)');
 
   function attempt(retriesLeft) {
-    var chunks = [];
-    req.on('data', function(chunk) { chunks.push(chunk); });
-    req.on('end', function() {
-      var body = Buffer.concat(chunks);
-      var options = {
-        hostname: GC_HOST,
-        path: gcPath,
-        method: req.method,
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'Content-Length': body.length
-        }
-      };
-      if (req.headers.authorization) {
-        options.headers['Authorization'] = req.headers.authorization;
+    var options = {
+      hostname: GC_HOST,
+      path:     gcPath,
+      method:   req.method,
+      headers: {
+        'Content-Type':   'application/json',
+        'Accept':         'application/json',
+        'Content-Length': body.length
       }
+    };
+    if (req.headers.authorization) options.headers['Authorization'] = req.headers.authorization;
 
-      var proxyReq = https.request(options, function(proxyRes) {
-        console.log('<- ' + proxyRes.statusCode + ' ' + req.method + ' ' + gcPath);
-        res.status(proxyRes.statusCode);
-        Object.keys(proxyRes.headers).forEach(function(h) {
-          if (h !== 'transfer-encoding') res.setHeader(h, proxyRes.headers[h]);
-        });
-        proxyRes.pipe(res);
+    var proxyReq = https.request(options, function(proxyRes) {
+      console.log('<- ' + proxyRes.statusCode + ' ' + req.method + ' ' + gcPath);
+      res.status(proxyRes.statusCode);
+      Object.keys(proxyRes.headers).forEach(function(h) {
+        if (h !== 'transfer-encoding') res.setHeader(h, proxyRes.headers[h]);
       });
-
-      proxyReq.on('error', function(err) {
-        console.error('Proxy error (' + err.message + '), retries left: ' + retriesLeft);
-        if (retriesLeft > 0) {
-          setTimeout(function() { attempt(retriesLeft - 1); }, 1000);
-        } else {
-          res.status(502).json({ error: 'Proxy error', detail: err.message });
-        }
-      });
-
-      if (body.length > 0) proxyReq.write(body);
-      proxyReq.end();
+      proxyRes.pipe(res);
     });
+
+    proxyReq.on('error', function(err) {
+      console.error('Proxy error: ' + err.message + ' (retries left: ' + retriesLeft + ')');
+      if (retriesLeft > 0) {
+        setTimeout(function() { attempt(retriesLeft - 1); }, 800);
+      } else {
+        if (!res.headersSent) res.status(502).json({ error: 'Proxy error', detail: err.message });
+      }
+    });
+
+    if (body.length > 0) proxyReq.write(body);
+    proxyReq.end();
   }
 
-  attempt(3); // retry up to 3 times
+  attempt(3);
 });
 
 // ── Serve static frontend ─────────────────────────────────────────────────────
@@ -129,6 +106,5 @@ app.get('*', function(req, res) {
 app.listen(PORT, function() {
   console.log('\n✅ Statement Vault running on port ' + PORT);
   console.log('   Proxying /api/* -> https://' + GC_HOST + '/api/v2/*');
-  console.log('   Session file: ' + SESSION_FILE);
-  console.log('   Environment: ' + (process.env.NODE_ENV || 'development') + '\n');
+  console.log('   Session file: ' + SESSION_FILE + '\n');
 });
