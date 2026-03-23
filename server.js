@@ -88,10 +88,10 @@ app.use('/api', createProxyMiddleware({
 }));
 
 // ── Serve static frontend ─────────────────────────────────────────────────────
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(__dirname));
 
 app.get('*', function(req, res) {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile(path.join(__dirname, 'index.html'));
 });
 
 app.listen(PORT, function() {
