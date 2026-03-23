@@ -347,6 +347,41 @@ function loadSavedConfig() {
   }
 }
 
+// Save a key to server session (syncs across devices)
+async function saveToServer(key, value) {
+  try {
+    var body = {};
+    body[key] = value;
+    await fetch('/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+  } catch(e) {
+    console.warn('Could not save to server session:', e.message);
+  }
+}
+
+// Delete a key from server session
+async function deleteFromServer(key) {
+  try {
+    await fetch('/session/' + encodeURIComponent(key), { method: 'DELETE' });
+  } catch(e) {
+    console.warn('Could not delete from server session:', e.message);
+  }
+}
+
+// Load full session from server — returns object with all saved keys
+async function loadServerSession() {
+  try {
+    var res = await fetch('/session');
+    return await res.json();
+  } catch(e) {
+    console.warn('Could not load server session:', e.message);
+    return {};
+  }
+}
+
 // ── GoCardless Auth ───────────────────────────────────────────────────────────
 async function getGCToken() {
   if (!state.config.secretId || !state.config.secretKey) {
@@ -453,6 +488,7 @@ async function doConnectBank(bankId, searchNameOrId, isDirectId) {
     if (data.link) {
       state.requisitions[bankId] = data.id;
       localStorage.setItem('req_' + bankId, data.id);
+      saveToServer('req_' + bankId, data.id);
       log('Opening bank auth...', 'ok');
       var popup = window.open(data.link, 'gc_auth_' + bankId, 'width=600,height=700,scrollbars=yes');
       var pollTimer = setInterval(async function() {
@@ -837,13 +873,35 @@ async function init() {
   var token = await getGCToken();
   if (!token) return;
   await lookupAllInstitutionIds();
-  restoreExtraBanks();
+
+  // Load session from server first (works across devices), fall back to localStorage
+  log('Loading saved sessions...', 'info');
+  var serverSession = await loadServerSession();
+
+  // Restore extra banks from server or localStorage
+  var savedExtraBanks = serverSession.extraBanks || JSON.parse(localStorage.getItem('extraBanks') || '{}');
+  if (Object.keys(savedExtraBanks).length > 0) {
+    Object.keys(savedExtraBanks).forEach(function(bankKey) {
+      var b = savedExtraBanks[bankKey];
+      state.extraBanks[bankKey] = b;
+      state.institutionIds[bankKey] = b.id;
+      state.accounts[bankKey] = [];
+      state.transactions[bankKey] = [];
+      renderExtraBankCard(bankKey, b.name, b.id);
+    });
+  }
+
+  // Resume all bank sessions
   var allKeys = ['nationwide','tesco'].concat(Object.keys(state.extraBanks || {}));
   for (var i = 0; i < allKeys.length; i++) {
     var bankId = allKeys[i];
-    var reqId = localStorage.getItem('req_' + bankId);
+    // Server session takes priority over localStorage
+    var reqId = serverSession['req_' + bankId] || localStorage.getItem('req_' + bankId);
     if (reqId) {
+      // Sync back to localStorage and server so both are up to date
       state.requisitions[bankId] = reqId;
+      localStorage.setItem('req_' + bankId, reqId);
+      if (!serverSession['req_' + bankId]) saveToServer('req_' + bankId, reqId);
       log('Resuming ' + bankId + '...', 'info');
       await loadAccounts(bankId);
     }
@@ -930,6 +988,7 @@ function addExtraBank(institutionId, institutionName) {
 
   // Save to localStorage
   localStorage.setItem('extraBanks', JSON.stringify(state.extraBanks));
+  saveToServer('extraBanks', state.extraBanks);
 
   // Render the card
   renderExtraBankCard(bankKey, institutionName, institutionId);
@@ -1014,6 +1073,9 @@ function removeExtraBank(bankKey) {
   delete state.transactions[bankKey];
   localStorage.removeItem('req_' + bankKey);
   localStorage.setItem('extraBanks', JSON.stringify(state.extraBanks));
+  deleteFromServer('req_' + bankKey);
+  deleteFromServer('extraBanks');
+  saveToServer('extraBanks', state.extraBanks);
   var card = document.getElementById('card-' + bankKey);
   if (card) card.parentNode.removeChild(card);
   log('Removed bank: ' + bankKey, 'info');
