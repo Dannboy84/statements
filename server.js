@@ -5,7 +5,6 @@
  */
 
 const express = require('express');
-const { createProxyMiddleware } = require('http-proxy-middleware');
 const path = require('path');
 const cors = require('cors');
 const fs = require('fs');
@@ -68,24 +67,57 @@ app.delete('/session/:key', function(req, res) {
 });
 
 // ── GoCardless API Proxy ──────────────────────────────────────────────────────
-app.use('/api', createProxyMiddleware({
-  target: 'https://' + GC_HOST,
-  changeOrigin: true,
-  pathRewrite: function(reqPath) {
-    var rewritten = '/api/v2' + reqPath;
-    console.log('-> GoCardless: ' + rewritten);
-    return rewritten;
-  },
-  on: {
-    proxyRes: function(proxyRes, req) {
-      console.log('<- ' + proxyRes.statusCode + ' ' + req.method + ' ' + req.path);
-    },
-    error: function(err, req, res) {
-      console.error('Proxy error:', err.message);
-      res.status(502).json({ error: 'Proxy error', detail: err.message });
-    }
+// Manual proxy with retry logic to handle ECONNRESET from Railway
+const https = require('https');
+
+app.use('/api', function(req, res) {
+  var gcPath = '/api/v2' + req.url;
+  console.log('-> GoCardless: ' + req.method + ' ' + gcPath);
+
+  function attempt(retriesLeft) {
+    var chunks = [];
+    req.on('data', function(chunk) { chunks.push(chunk); });
+    req.on('end', function() {
+      var body = Buffer.concat(chunks);
+      var options = {
+        hostname: GC_HOST,
+        path: gcPath,
+        method: req.method,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'Content-Length': body.length
+        }
+      };
+      if (req.headers.authorization) {
+        options.headers['Authorization'] = req.headers.authorization;
+      }
+
+      var proxyReq = https.request(options, function(proxyRes) {
+        console.log('<- ' + proxyRes.statusCode + ' ' + req.method + ' ' + gcPath);
+        res.status(proxyRes.statusCode);
+        Object.keys(proxyRes.headers).forEach(function(h) {
+          if (h !== 'transfer-encoding') res.setHeader(h, proxyRes.headers[h]);
+        });
+        proxyRes.pipe(res);
+      });
+
+      proxyReq.on('error', function(err) {
+        console.error('Proxy error (' + err.message + '), retries left: ' + retriesLeft);
+        if (retriesLeft > 0) {
+          setTimeout(function() { attempt(retriesLeft - 1); }, 1000);
+        } else {
+          res.status(502).json({ error: 'Proxy error', detail: err.message });
+        }
+      });
+
+      if (body.length > 0) proxyReq.write(body);
+      proxyReq.end();
+    });
   }
-}));
+
+  attempt(3); // retry up to 3 times
+});
 
 // ── Serve static frontend ─────────────────────────────────────────────────────
 app.use(express.static(__dirname));
