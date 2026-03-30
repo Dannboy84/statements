@@ -98,6 +98,8 @@
   .tab.active { background: var(--accent-dim); border-color: #3a5a3b; color: var(--accent); }
   .tab-content { display: none; }
   .tab-content.active { display: block; }
+  #configBody { overflow: hidden; transition: max-height 0.3s ease; max-height: 0; }
+  #configBody.open { max-height: 800px; }
   .search-results { margin-top: 12px; max-height: 300px; overflow-y: auto; }
   .search-result-item { background: var(--bg); border: 1px solid var(--border-light); border-radius: 8px; padding: 12px 14px; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; transition: border-color 0.15s; }
   .search-result-item:hover { border-color: var(--accent); }
@@ -124,7 +126,11 @@
   </header>
 
   <div class="setup-panel">
-    <div class="panel-title">Setup & Configuration</div>
+    <div class="panel-title" onclick="toggleConfig()" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;user-select:none;">
+      <span>Setup & Configuration</span>
+      <span id="configChevron" style="font-size:16px;color:var(--muted);transition:transform 0.2s">▾</span>
+    </div>
+    <div id="configBody">
     <div class="tabs">
       <div class="tab active" onclick="switchTab('config')">Config</div>
       <div class="tab" onclick="switchTab('instructions')">How It Works</div>
@@ -205,10 +211,9 @@
         <button class="btn btn-ghost btn-sm" onclick="refreshAccounts('tesco')">Refresh</button>
       </div>
       <div class="accounts-list" id="accounts-tesco"></div>
-      <div style="margin-top:8px">
-        <button class="btn btn-ghost btn-sm" onclick="debugRawTransaction('tesco')" style="font-size:10px;color:var(--muted)">Debug: show raw transaction</button>
-      </div>
+
     </div>
+    </div><!-- end configBody -->
   </div>
 
   <div class="extra-banks" id="extraBanks"></div>
@@ -281,6 +286,15 @@ function log(msg, type) {
   body.scrollTop = body.scrollHeight;
 }
 function clearLog() { document.getElementById('logBody').innerHTML = ''; }
+
+// ── Config toggle ────────────────────────────────────────────────────────────
+function toggleConfig() {
+  var body = document.getElementById('configBody');
+  var chevron = document.getElementById('configChevron');
+  var isOpen = body.classList.contains('open');
+  body.classList.toggle('open', !isOpen);
+  chevron.style.transform = isOpen ? '' : 'rotate(180deg)';
+}
 
 // ── Tabs ─────────────────────────────────────────────────────────────────────
 function switchTab(id) {
@@ -1148,6 +1162,11 @@ window.addEventListener('load', function() {
   if (restored && state.config.secretId && state.config.secretKey) {
     init();
   } else {
+    // No saved config — open the panel so user knows to fill it in
+    var body = document.getElementById('configBody');
+    var chevron = document.getElementById('configChevron');
+    body.classList.add('open');
+    chevron.style.transform = 'rotate(180deg)';
     log('Enter your credentials and click Save Config to begin.', 'warn');
   }
 });
