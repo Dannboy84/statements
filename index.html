@@ -839,7 +839,10 @@ function connectDrive() {
   var clientId = state.config.driveClientId;
   if (!clientId) { log('Enter your Google Drive OAuth Client ID in Config first.', 'warn'); return; }
   var scope = 'https://www.googleapis.com/auth/drive.file';
-  var authUrl = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=' + encodeURIComponent(clientId) + '&redirect_uri=' + encodeURIComponent(state.config.redirectUri) + '&response_type=token&scope=' + encodeURIComponent(scope);
+  // Always use the current page origin as redirect URI — no manual entry needed
+  var redirectUri = window.location.origin + window.location.pathname;
+  var authUrl = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=' + encodeURIComponent(clientId) + '&redirect_uri=' + encodeURIComponent(redirectUri) + '&response_type=token&scope=' + encodeURIComponent(scope);
+  log('Using redirect URI: ' + redirectUri, 'info');
   var popup = window.open(authUrl, 'drive_auth', 'width=500,height=600');
   var poll = setInterval(function() {
     try {
