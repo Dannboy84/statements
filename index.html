@@ -868,16 +868,23 @@ async function saveToDrive() {
   var banks = allDriveBanks.filter(function(b) { return state.transactions[b] && state.transactions[b].length > 0; });
   if (!banks.length) { log('No transactions to save. Fetch first.', 'warn'); return; }
   log('Saving to Google Drive...', 'info');
+  log('Banks with transactions: ' + banks.join(', '), 'info');
   var folderId = await getOrCreateDriveFolder('Bank Statements');
   if (!folderId) { log('Could not create Drive folder.', 'err'); return; }
   for (var i = 0; i < banks.length; i++) {
     var b = banks[i];
-    await uploadFileToDrive(b + '-statements-' + dateFrom + '-to-' + dateTo + '.csv', getCSV(b, state.transactions[b]), folderId);
+    var filename = b + '-statements-' + dateFrom + '-to-' + dateTo + '.csv';
+    log('Uploading: ' + filename, 'info');
+    await uploadFileToDrive(filename, getCSV(b, state.transactions[b]), folderId);
   }
   var allTxnBanks = ['nationwide','tesco'].concat(Object.keys(state.extraBanks || {}));
   var all = allTxnBanks.reduce(function(acc, b) { return acc.concat(state.transactions[b] || []); }, []);
-  if (all.length) await uploadFileToDrive('all-statements-' + dateFrom + '-to-' + dateTo + '.csv', genericToCSV(all), folderId);
-  log('All files saved to Google Drive -> Bank Statements/', 'ok');
+  if (all.length) {
+    var allFilename = 'all-statements-' + dateFrom + '-to-' + dateTo + '.csv';
+    log('Uploading: ' + allFilename, 'info');
+    await uploadFileToDrive(allFilename, genericToCSV(all), folderId);
+  }
+  log('Done. Saved to Google Drive -> Bank Statements/', 'ok');
 }
 
 async function getOrCreateDriveFolder(name) {
