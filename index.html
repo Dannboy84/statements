@@ -729,17 +729,22 @@ function formatTescoDate(d) {
   return d;
 }
 
+function parseTescoTransactionDate(remittance) {
+  if (!remittance) return null;
+  var match = remittance.match(/Transaction Date[:\s]+(\d{4}-\d{2}-\d{2})/i);
+  if (match) return formatTescoDate(match[1]);
+  return null;
+}
+
 function tescoToCSV(txns) {
   var rows = [['Transaction Date','Posting Date','Billing Amount','Merchant','Merchant City','Merchant County','Merchant Postal Code','Reference Number','Debit/Credit Flag','SICMCC Code']];
   for (var i = 0; i < txns.length; i++) {
     var t = txns[i];
     var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
     var debitCredit = amount < 0 ? 'Debit' : 'Credit';
-    // Always show as positive with GBP symbol to match native Tesco format
-    var billingAmount = '£' + Math.abs(amount).toFixed(2);
-    var merchant = t.creditorName || t.debtorName || t.remittanceInformationUnstructured || '';
-    // Use Tesco's own reference number from endToEndId (the long numeric string)
-    // Try every possible reference field GoCardless may populate
+    var billingAmount = '\u00a3' + Math.abs(amount).toFixed(2);
+    var merchant = t.creditorName || t.debtorName || '';
+    var remittance = t.remittanceInformationUnstructured || '';
     var ref = t.endToEndId
            || t.internalTransactionId
            || t.transactionId
@@ -748,17 +753,11 @@ function tescoToCSV(txns) {
            || (t.debtorAccount && t.debtorAccount.bban ? t.debtorAccount.bban : '')
            || t.additionalInformation
            || '';
-    // SIC/MCC code from bank transaction code
-    var sicCode = '';
-    if (t.proprietaryBankTransactionCode && t.proprietaryBankTransactionCode.code) {
-      sicCode = t.proprietaryBankTransactionCode.code;
-    } else if (t.bankTransactionCode && t.bankTransactionCode.subFamily && t.bankTransactionCode.subFamily.code) {
-      sicCode = t.bankTransactionCode.subFamily.code;
-    }
-    // Tesco native export uses valueDate (transaction date) as Transaction Date
-    // and bookingDate (posting date) as Posting Date — matching what you see on screen
-    var txDate   = formatTescoDate(t.valueDate   || t.bookingDate || '');
-    var postDate = formatTescoDate(t.bookingDate || t.valueDate   || '');
+    var sicCode = t.merchantCategoryCode
+               || (t.proprietaryBankTransactionCode ? t.proprietaryBankTransactionCode.code : '')
+               || '';
+    var txDate   = parseTescoTransactionDate(remittance) || formatTescoDate(t.bookingDate || '');
+    var postDate = formatTescoDate(t.bookingDate || '');
     rows.push([txDate, postDate, billingAmount, merchant, '', '', '', ref, debitCredit, sicCode]);
   }
   return rows.map(function(r) { return r.map(esc).join(','); }).join('\n');
