@@ -205,6 +205,9 @@
         <button class="btn btn-ghost btn-sm" onclick="refreshAccounts('tesco')">Refresh</button>
       </div>
       <div class="accounts-list" id="accounts-tesco"></div>
+      <div style="margin-top:8px">
+        <button class="btn btn-ghost btn-sm" onclick="debugRawTransaction('tesco')" style="font-size:10px;color:var(--muted)">Debug: show raw transaction</button>
+      </div>
     </div>
   </div>
 
@@ -1108,6 +1111,35 @@ function restoreExtraBanks() {
     });
   } catch(e) {
     log('Could not restore extra banks: ' + e.message, 'warn');
+  }
+}
+
+// ── Debug ────────────────────────────────────────────────────────────────────
+async function debugRawTransaction(bankId) {
+  var token = state.tokens.gocardless || await getGCToken();
+  if (!token) return;
+  var accounts = state.accounts[bankId];
+  if (!accounts || !accounts.length) { log('No accounts connected for ' + bankId, 'warn'); return; }
+  try {
+    var url = gcBase() + '/accounts/' + accounts[0] + '/transactions/?date_from=2026-03-20&date_to=2026-03-26';
+    var res = await fetch(url, { headers: gcHeaders() });
+    var data = await res.json();
+    var txns = data.transactions ? (data.transactions.booked || []) : [];
+    if (!txns.length) { log('No transactions found in debug range', 'warn'); return; }
+    // Log all date-related fields from first 3 transactions
+    txns.slice(0, 3).forEach(function(t, i) {
+      log('--- Transaction ' + (i+1) + ' ---', 'info');
+      log('bookingDate: ' + (t.bookingDate || 'MISSING'), 'info');
+      log('valueDate: ' + (t.valueDate || 'MISSING'), 'info');
+      log('transactionDate: ' + (t.transactionDate || 'MISSING'), 'info');
+      log('remittance: ' + (t.remittanceInformationUnstructured || '').slice(0, 60), 'info');
+      log('merchant: ' + (t.creditorName || t.debtorName || 'n/a'), 'info');
+      log('amount: ' + (t.transactionAmount ? t.transactionAmount.amount : 'n/a'), 'info');
+      // Log all keys present
+      log('all keys: ' + Object.keys(t).join(', '), 'warn');
+    });
+  } catch(e) {
+    log('Debug error: ' + e.message, 'err');
   }
 }
 
