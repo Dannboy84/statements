@@ -389,6 +389,8 @@ async function getGCToken() {
     return null;
   }
   try {
+    // Wake up Railway server before making the auth call
+    await fetch('/ping').catch(function() {});
     log('Authenticating with GoCardless...', 'info');
     var res = await fetch(gcBase() + '/token/new/', {
       method: 'POST',
@@ -734,7 +736,15 @@ function tescoToCSV(txns) {
     var billingAmount = '£' + Math.abs(amount).toFixed(2);
     var merchant = t.creditorName || t.debtorName || t.remittanceInformationUnstructured || '';
     // Use Tesco's own reference number from endToEndId (the long numeric string)
-    var ref = t.endToEndId || t.internalTransactionId || t.transactionId || '';
+    // Try every possible reference field GoCardless may populate
+    var ref = t.endToEndId
+           || t.internalTransactionId
+           || t.transactionId
+           || t.mandateId
+           || (t.creditorAccount && t.creditorAccount.bban ? t.creditorAccount.bban : '')
+           || (t.debtorAccount && t.debtorAccount.bban ? t.debtorAccount.bban : '')
+           || t.additionalInformation
+           || '';
     // SIC/MCC code from bank transaction code
     var sicCode = '';
     if (t.proprietaryBankTransactionCode && t.proprietaryBankTransactionCode.code) {
@@ -742,8 +752,10 @@ function tescoToCSV(txns) {
     } else if (t.bankTransactionCode && t.bankTransactionCode.subFamily && t.bankTransactionCode.subFamily.code) {
       sicCode = t.bankTransactionCode.subFamily.code;
     }
-    var txDate = formatTescoDate(t.bookingDate || t.valueDate || '');
-    var postDate = formatTescoDate(t.valueDate || t.bookingDate || '');
+    // Tesco native export uses valueDate (transaction date) as Transaction Date
+    // and bookingDate (posting date) as Posting Date — matching what you see on screen
+    var txDate   = formatTescoDate(t.valueDate   || t.bookingDate || '');
+    var postDate = formatTescoDate(t.bookingDate || t.valueDate   || '');
     rows.push([txDate, postDate, billingAmount, merchant, '', '', '', ref, debitCredit, sicCode]);
   }
   return rows.map(function(r) { return r.map(esc).join(','); }).join('\n');
