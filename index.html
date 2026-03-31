@@ -161,6 +161,10 @@
           <label>Google Drive OAuth Client ID</label>
           <input type="text" id="driveClientId" placeholder="xxx.apps.googleusercontent.com"/>
         </div>
+        <div class="field full">
+          <label>LunchMoney Start — Google Sheet ID</label>
+          <input type="text" id="sheetId" placeholder="Paste the ID from your Google Sheet URL"/>
+        </div>
       </div>
       <button class="btn btn-primary" onclick="saveConfig()">Save Config</button>
     </div>
@@ -173,12 +177,12 @@
       </ol>
     </div>
     <div class="tab-content" id="tab-gdrive">
-      <div class="info-box"><strong>Google Drive</strong> requires a GCP project with Drive API enabled and OAuth 2.0 credentials.</div>
+      <div class="info-box"><strong>Google Sheets integration</strong> — data is written directly into your "LunchMoney Start" spreadsheet. Nationwide appends to the bottom of <strong>Nationwide - BS</strong>. Tesco inserts new rows after the header in <strong>Tesco - BS</strong>.</div>
       <ol class="steps-list">
-        <li>Go to <strong>console.cloud.google.com</strong> and enable the Google Drive API</li>
+        <li>Go to <strong>console.cloud.google.com</strong> and enable both <strong>Google Drive API</strong> and <strong>Google Sheets API</strong></li>
         <li>Create OAuth 2.0 Client ID (Web application) with your Railway URL as authorised origin and redirect URI</li>
-        <li>Paste the Client ID in Config above</li>
-        <li>Click Connect Google Drive below</li>
+        <li>Add your Google account as a <strong>test user</strong> under OAuth consent screen</li>
+        <li>Paste the Client ID in Config above, then click Connect Google Drive below</li>
       </ol>
       <button class="btn btn-ghost" onclick="connectDrive()" id="driveConnectBtn">Connect Google Drive</button>
       <span id="driveStatus" style="display:none;margin-left:12px;font-size:11px;color:var(--accent);">Connected</span>
@@ -341,6 +345,7 @@ function saveConfig() {
   state.config.env         = document.getElementById('gcEnv').value;
   state.config.redirectUri = document.getElementById('redirectUri').value.trim();
   state.config.driveClientId = document.getElementById('driveClientId').value.trim();
+  state.config.sheetId       = document.getElementById('sheetId').value.trim();
   localStorage.setItem('sv_config', JSON.stringify(state.config));
   log('Configuration saved.', 'ok');
   init();
@@ -357,6 +362,7 @@ function loadSavedConfig() {
     document.getElementById('gcEnv').value         = c.env         || 'production';
     document.getElementById('redirectUri').value   = c.redirectUri || '';
     document.getElementById('driveClientId').value = c.driveClientId || '';
+    document.getElementById('sheetId').value       = c.sheetId       || '';
     return true;
   } catch(e) {
     log('Could not restore config: ' + e.message, 'warn');
@@ -838,7 +844,7 @@ function downloadCSV(bankId) {
 function connectDrive() {
   var clientId = state.config.driveClientId;
   if (!clientId) { log('Enter your Google Drive OAuth Client ID in Config first.', 'warn'); return; }
-  var scope = 'https://www.googleapis.com/auth/drive.file';
+  var scope = 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets';
   // Always use the current page origin as redirect URI — no manual entry needed
   var redirectUri = window.location.origin + window.location.pathname;
   var authUrl = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=' + encodeURIComponent(clientId) + '&redirect_uri=' + encodeURIComponent(redirectUri) + '&response_type=token&scope=' + encodeURIComponent(scope);
@@ -860,51 +866,641 @@ function connectDrive() {
   }, 500);
 }
 
+// ── Google Sheets integration ─────────────────────────────────────────────────
+var SPREADSHEET_NAME = 'LunchMoney Start';
+var SHEET_CONFIG = {
+  nationwide: { tabName: 'Nationwide - BS', insertMode: 'append'  }, // append to bottom
+  tesco:      { tabName: 'Tesco - BS',      insertMode: 'prepend' }  // insert after row 1
+};
+
+async function findSpreadsheet(name) {
+  var res = await fetch(
+    "https://www.googleapis.com/drive/v3/files?q=name='" + name + "' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false&fields=files(id,name)",
+    { headers: { 'Authorization': 'Bearer ' + state.tokens.drive } }
+  );
+  var data = await res.json();
+  if (data.files && data.files.length > 0) {
+    log('Found spreadsheet: ' + data.files[0].name + ' (' + data.files[0].id + ')', 'ok');
+    return data.files[0].id;
+  }
+  log('Could not find spreadsheet named "' + name + '". Make sure it exists in your Google Drive.', 'err');
+  return null;
+}
+
+async function getSheetLastRow(spreadsheetId, tabName) {
+  var res = await fetch(
+    'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/' + encodeURIComponent(tabName) + '!A:A',
+    { headers: { 'Authorization': 'Bearer ' + state.tokens.drive } }
+  );
+  var data = await res.json();
+  return data.values ? data.values.length : 1;
+}
+
+async function appendRowsToSheet(spreadsheetId, tabName, rows) {
+  // Append rows to the bottom of the sheet
+  var res = await fetch(
+    'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/' + encodeURIComponent(tabName) + '!A1:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS',
+    {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + state.tokens.drive, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values: rows })
+    }
+  );
+  var data = await res.json();
+  if (data.updates) {
+    log('Appended ' + rows.length + ' rows to ' + tabName, 'ok');
+    return true;
+  }
+  log('Error appending to ' + tabName + ': ' + JSON.stringify(data), 'err');
+  return false;
+}
+
+async function insertRowsAfterHeader(spreadsheetId, tabName, rows, sheetId) {
+  // Insert rows after row 1 (header) — pushes existing data down
+  // Step 1: insert blank rows at position 1 (0-indexed)
+  var insertRes = await fetch(
+    'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + ':batchUpdate',
+    {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + state.tokens.drive, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        requests: [{
+          insertDimension: {
+            range: { sheetId: sheetId, dimension: 'ROWS', startIndex: 1, endIndex: 1 + rows.length },
+            inheritFromBefore: false
+          }
+        }]
+      })
+    }
+  );
+  var insertData = await insertRes.json();
+  if (insertData.error) { log('Error inserting rows: ' + JSON.stringify(insertData.error), 'err'); return false; }
+
+  // Step 2: write data into the newly inserted rows
+  var writeRes = await fetch(
+    'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/' + encodeURIComponent(tabName) + '!A2:Z' + (1 + rows.length) + '?valueInputOption=USER_ENTERED',
+    {
+      method: 'PUT',
+      headers: { 'Authorization': 'Bearer ' + state.tokens.drive, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values: rows })
+    }
+  );
+  var writeData = await writeRes.json();
+  if (writeData.updatedRows) {
+    log('Inserted ' + rows.length + ' rows at top of ' + tabName, 'ok');
+    return true;
+  }
+  log('Error writing to ' + tabName + ': ' + JSON.stringify(writeData), 'err');
+  return false;
+}
+
+async function getSheetIdByName(spreadsheetId, tabName) {
+  var res = await fetch(
+    'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '?fields=sheets.properties',
+    { headers: { 'Authorization': 'Bearer ' + state.tokens.drive } }
+  );
+  var data = await res.json();
+  if (data.sheets) {
+    for (var i = 0; i < data.sheets.length; i++) {
+      if (data.sheets[i].properties.title === tabName) return data.sheets[i].properties.sheetId;
+    }
+  }
+  log('Tab "' + tabName + '" not found in spreadsheet.', 'err');
+  return null;
+}
+
+function txnsToRows(bankId, txns) {
+  // Convert transactions to 2D array matching the sheet columns (no header row)
+  if (bankId === 'nationwide') {
+    var sorted = txns.slice().sort(function(a, b) {
+      var da = a.bookingDate || a.valueDate || '';
+      var db = b.bookingDate || b.valueDate || '';
+      return db > da ? 1 : db < da ? -1 : 0;
+    });
+    var accId = sorted.length > 0 ? sorted[0]._account : null;
+    var currentBalance = (state.balances && state.balances.nationwide && accId) ? state.balances.nationwide[accId] : null;
+    var runningBal = currentBalance;
+    var balances = [];
+    for (var i = 0; i < sorted.length; i++) {
+      balances.push(runningBal !== null ? runningBal : '');
+      if (runningBal !== null) {
+        var amt = parseFloat(sorted[i].transactionAmount ? sorted[i].transactionAmount.amount : 0);
+        runningBal = Math.round((runningBal - amt) * 100) / 100;
+      }
+    }
+    return sorted.map(function(t, i) {
+      var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
+      var paidOut = amount < 0 ? Math.abs(amount).toFixed(2) : '';
+      var paidIn  = amount >= 0 ? amount.toFixed(2) : '';
+      var raw = (t.remittanceInformationUnstructured || t.remittanceInformationStructured || '').toLowerCase();
+      var txType;
+      if (amount < 0) {
+        if (raw.indexOf('direct debit') !== -1) txType = 'Direct debit';
+        else if (raw.indexOf('visa') !== -1 || raw.indexOf('purchase') !== -1) txType = 'Visa purchase';
+        else if (raw.indexOf('payment to') !== -1 || raw.indexOf('transfer') !== -1) txType = 'Payment to';
+        else if (raw.indexOf('atm') !== -1 || raw.indexOf('withdrawal') !== -1) txType = 'ATM Withdrawal NATIONWIDE';
+        else if (raw.indexOf('cash') !== -1) txType = 'Cash withdrawal';
+        else if (raw.indexOf('foreign currency') !== -1) txType = 'Foreign currency transaction fee';
+        else txType = 'Direct debit';
+      } else {
+        if (raw.indexOf('interest') !== -1) txType = 'Interest added';
+        else if (raw.indexOf('cash credit') !== -1) txType = 'Cash credit';
+        else txType = 'Bank credit';
+      }
+      var description = t.creditorName || t.debtorName || t.remittanceInformationUnstructured || t.remittanceInformationStructured || '';
+      var balStr = balances[i] !== '' ? balances[i].toFixed(2) : '';
+      return [formatNationwideDate(t.bookingDate || t.valueDate || ''), txType, description, paidOut, paidIn, balStr];
+    });
+  }
+
+  if (bankId === 'tesco') {
+    return txns.map(function(t) {
+      var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
+      var debitCredit = amount < 0 ? 'Debit' : 'Credit';
+      var billingAmount = Math.abs(amount).toFixed(2);
+      var merchant = t.creditorName || t.debtorName || '';
+      var remittance = t.remittanceInformationUnstructured || '';
+      var ref = t.endToEndId || t.internalTransactionId || t.transactionId || t.mandateId || '';
+      var sicCode = t.merchantCategoryCode || '';
+      var txDate   = parseTescoTransactionDate(remittance) || formatTescoDate(t.bookingDate || '');
+      var postDate = formatTescoDate(t.bookingDate || '');
+      var city = t.merchantDetails ? (t.merchantDetails.merchantCategoryCode || '') : '';
+      var county = '';
+      var postcode = '';
+      return [txDate, postDate, billingAmount, merchant, city, county, postcode, ref, debitCredit, sicCode];
+    });
+  }
+
+  // Generic
+  return txns.map(function(t) {
+    return [
+      t.bookingDate || t.valueDate || '',
+      t.transactionAmount ? t.transactionAmount.amount : '',
+      t.transactionAmount ? t.transactionAmount.currency : '',
+      t.remittanceInformationUnstructured || '',
+      t.creditorName || '', t.debtorName || '',
+      t.endToEndId || '', t.status || 'booked'
+    ];
+  });
+}
+
+// ── Google Sheets helpers ─────────────────────────────────────────────────────
+
+async function findSpreadsheetByName(name) {
+  var q = encodeURIComponent("name='" + name + "' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false");
+  var res = await fetch(
+    'https://www.googleapis.com/drive/v3/files?q=' + q + '&fields=files(id,name)',
+    { headers: { 'Authorization': 'Bearer ' + state.tokens.drive } }
+  );
+  var data = await res.json();
+  if (data.files && data.files.length > 0) return data.files[0].id;
+  return null;
+}
+
+async function getSheetTabId(spreadsheetId, tabName) {
+  var res = await fetch(
+    'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '?fields=sheets.properties',
+    { headers: { 'Authorization': 'Bearer ' + state.tokens.drive } }
+  );
+  var data = await res.json();
+  if (!data.sheets) return null;
+  var sheet = data.sheets.find(function(s) { return s.properties.title === tabName; });
+  return sheet ? sheet.properties.sheetId : null;
+}
+
+// Append rows to BOTTOM of sheet (Nationwide)
+async function appendRowsToSheet(spreadsheetId, tabName, rows) {
+  var range = encodeURIComponent(tabName) + '!A1';
+  var res = await fetch(
+    'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/' + range + ':append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS',
+    {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + state.tokens.drive, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values: rows })
+    }
+  );
+  return await res.json();
+}
+
+// Insert rows at row 2 pushing everything else down (Tesco — newest first at top)
+async function insertRowsAtTop(spreadsheetId, tabName, rows) {
+  var sheetId = await getSheetTabId(spreadsheetId, tabName);
+  if (sheetId === null) { log('Tab not found: ' + tabName, 'err'); return null; }
+
+  // Insert blank rows after the header (startIndex:1 = after row 1)
+  var insertRes = await fetch(
+    'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + ':batchUpdate',
+    {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + state.tokens.drive, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        requests: [{
+          insertDimension: {
+            range: { sheetId: sheetId, dimension: 'ROWS', startIndex: 1, endIndex: 1 + rows.length },
+            inheritFromBefore: false
+          }
+        }]
+      })
+    }
+  );
+  var insertData = await insertRes.json();
+  if (insertData.error) { log('Row insert error: ' + insertData.error.message, 'err'); return null; }
+
+  // Write data into the newly inserted rows
+  var writeRange = encodeURIComponent(tabName) + '!A2';
+  var writeRes = await fetch(
+    'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/' + writeRange + '?valueInputOption=USER_ENTERED',
+    {
+      method: 'PUT',
+      headers: { 'Authorization': 'Bearer ' + state.tokens.drive, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values: rows })
+    }
+  );
+  return await writeRes.json();
+}
+
+// Convert transactions to 2D array for Sheets API
+function nationwideToRows(txns) {
+  var sorted = txns.slice().sort(function(a, b) {
+    var da = a.bookingDate || a.valueDate || '';
+    var db = b.bookingDate || b.valueDate || '';
+    return da > db ? 1 : da < db ? -1 : 0;
+  });
+  var rows = [];
+  for (var i = 0; i < sorted.length; i++) {
+    var t = sorted[i];
+    var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
+    var paidOut = amount < 0 ? Math.abs(amount).toFixed(2) : '';
+    var paidIn  = amount >= 0 ? amount.toFixed(2) : '';
+    var raw = (t.remittanceInformationUnstructured || t.remittanceInformationStructured || '').toLowerCase();
+    var txType;
+    if (amount < 0) {
+      if (raw.indexOf('direct debit') !== -1) txType = 'Direct debit';
+      else if (raw.indexOf('visa') !== -1 || raw.indexOf('purchase') !== -1) txType = 'Visa purchase';
+      else if (raw.indexOf('payment to') !== -1 || raw.indexOf('transfer') !== -1) txType = 'Payment to';
+      else if (raw.indexOf('atm') !== -1 || raw.indexOf('withdrawal') !== -1) txType = 'ATM Withdrawal NATIONWIDE';
+      else if (raw.indexOf('cash') !== -1) txType = 'Cash withdrawal';
+      else if (raw.indexOf('foreign currency') !== -1) txType = 'Foreign currency transaction fee';
+      else txType = 'Direct debit';
+    } else {
+      if (raw.indexOf('interest') !== -1) txType = 'Interest added';
+      else if (raw.indexOf('cash credit') !== -1) txType = 'Cash credit';
+      else txType = 'Bank credit';
+    }
+    var desc = t.creditorName || t.debtorName || t.remittanceInformationUnstructured || '';
+    rows.push([formatNationwideDate(t.bookingDate || t.valueDate || ''), txType, desc, paidOut, paidIn, '']);
+  }
+  return rows;
+}
+
+function tescoToRows(txns) {
+  // Newest first — inserts at top below header
+  var sorted = txns.slice().sort(function(a, b) {
+    var da = a.bookingDate || a.valueDate || '';
+    var db = b.bookingDate || b.valueDate || '';
+    return db > da ? 1 : db < da ? -1 : 0;
+  });
+  var rows = [];
+  for (var i = 0; i < sorted.length; i++) {
+    var t = sorted[i];
+    var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
+    var debitCredit = amount < 0 ? 'Debit' : 'Credit';
+    var billingAmount = Math.abs(amount).toFixed(2);
+    var merchant = t.creditorName || t.debtorName || '';
+    var remittance = t.remittanceInformationUnstructured || '';
+    var ref = t.endToEndId || t.internalTransactionId || t.transactionId || t.additionalInformation || '';
+    var sicCode = t.merchantCategoryCode || '';
+    var txDate   = parseTescoTransactionDate(remittance) || formatTescoDate(t.bookingDate || '');
+    var postDate = formatTescoDate(t.bookingDate || '');
+    rows.push([txDate, postDate, billingAmount, merchant, '', '', '', ref, debitCredit, sicCode]);
+  }
+  return rows;
+}
+
+function genericToRows(txns) {
+  return txns.map(function(t) { return [
+    t.bookingDate || t.valueDate || '',
+    t.transactionAmount ? t.transactionAmount.amount : '',
+    t.transactionAmount ? t.transactionAmount.currency : '',
+    t.remittanceInformationUnstructured || t.remittanceInformationStructured || '',
+    t.creditorName || '', t.debtorName || '',
+    t.endToEndId || t.internalTransactionId || '',
+    t.status || 'booked'
+  ]; });
+}
+
 async function saveToDrive() {
   if (!state.tokens.drive) { log('Connect Google Drive first.', 'warn'); connectDrive(); return; }
-  var dateFrom = document.getElementById('dateFrom').value;
-  var dateTo   = document.getElementById('dateTo').value;
+
   var allDriveBanks = ['nationwide','tesco'].concat(Object.keys(state.extraBanks || {}));
   var banks = allDriveBanks.filter(function(b) { return state.transactions[b] && state.transactions[b].length > 0; });
   if (!banks.length) { log('No transactions to save. Fetch first.', 'warn'); return; }
-  log('Saving to Google Drive...', 'info');
-  log('Banks with transactions: ' + banks.join(', '), 'info');
-  var folderId = await getOrCreateDriveFolder('Bank Statements');
-  if (!folderId) { log('Could not create Drive folder.', 'err'); return; }
+
+  var sheetNameEl = document.getElementById('sheetName');
+  var targetSheet = (sheetNameEl && sheetNameEl.value.trim()) ? sheetNameEl.value.trim() : 'LunchMoney Start';
+
+  log('Looking for spreadsheet: "' + targetSheet + '"...', 'info');
+  var spreadsheetId = await findSpreadsheetByName(targetSheet);
+  if (!spreadsheetId) {
+    log('Spreadsheet "' + targetSheet + '" not found. Check the name in the Google Drive tab and make sure it is in your Drive.', 'err');
+    return;
+  }
+  log('Found spreadsheet.', 'ok');
+
   for (var i = 0; i < banks.length; i++) {
-    var b = banks[i];
-    var filename = b + '-statements-' + dateFrom + '-to-' + dateTo + '.csv';
-    log('Uploading: ' + filename, 'info');
-    await uploadFileToDrive(filename, getCSV(b, state.transactions[b]), folderId);
+    var bankId = banks[i];
+    var txns = state.transactions[bankId];
+
+    if (bankId === 'nationwide') {
+      var rows = nationwideToRows(txns);
+      log('Appending ' + rows.length + ' rows to bottom of "Nationwide - BS"...', 'info');
+      var result = await appendRowsToSheet(spreadsheetId, 'Nationwide - BS', rows);
+      if (result && result.error) log('Nationwide error: ' + result.error.message, 'err');
+      else log('Nationwide: ' + rows.length + ' rows added.', 'ok');
+
+    } else if (bankId === 'tesco') {
+      var rows = tescoToRows(txns);
+      log('Inserting ' + rows.length + ' rows at top of "Tesco - BS"...', 'info');
+      var result = await insertRowsAtTop(spreadsheetId, 'Tesco - BS', rows);
+      if (result && result.error) log('Tesco error: ' + result.error.message, 'err');
+      else log('Tesco: ' + rows.length + ' rows inserted at row 2.', 'ok');
+
+    } else {
+      var rows = genericToRows(txns);
+      var tabName = (state.extraBanks[bankId] ? state.extraBanks[bankId].name : bankId) + ' - BS';
+      log('Appending ' + rows.length + ' rows to "' + tabName + '"...', 'info');
+      var result = await appendRowsToSheet(spreadsheetId, tabName, rows);
+      if (result && result.error) log(bankId + ' error: ' + result.error.message, 'err');
+      else log(bankId + ': ' + rows.length + ' rows added.', 'ok');
+    }
   }
-  var allTxnBanks = ['nationwide','tesco'].concat(Object.keys(state.extraBanks || {}));
-  var all = allTxnBanks.reduce(function(acc, b) { return acc.concat(state.transactions[b] || []); }, []);
-  if (all.length) {
-    var allFilename = 'all-statements-' + dateFrom + '-to-' + dateTo + '.csv';
-    log('Uploading: ' + allFilename, 'info');
-    await uploadFileToDrive(allFilename, genericToCSV(all), folderId);
-  }
-  log('Done. Saved to Google Drive -> Bank Statements/', 'ok');
+  log('Done! Data saved to "' + targetSheet + '".', 'ok');
 }
 
-async function getOrCreateDriveFolder(name) {
-  var search = await fetch("https://www.googleapis.com/drive/v3/files?q=name='" + name + "' and mimeType='application/vnd.google-apps.folder' and trashed=false&fields=files(id,name)", { headers: { 'Authorization': 'Bearer ' + state.tokens.drive } });
-  var data = await search.json();
-  if (data.files && data.files[0]) return data.files[0].id;
-  var create = await fetch('https://www.googleapis.com/drive/v3/files', { method: 'POST', headers: { 'Authorization': 'Bearer ' + state.tokens.drive, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name, mimeType: 'application/vnd.google-apps.folder' }) });
-  var folder = await create.json();
-  return folder.id;
+function sheetsHeaders() {
+  return {
+    'Authorization': 'Bearer ' + state.tokens.drive,
+    'Content-Type': 'application/json'
+  };
 }
 
-async function uploadFileToDrive(filename, content, folderId) {
-  var form = new FormData();
-  form.append('metadata', new Blob([JSON.stringify({ name: filename, parents: [folderId] })], { type: 'application/json' }));
-  form.append('file', new Blob([content], { type: 'text/csv' }));
-  var res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', { method: 'POST', headers: { 'Authorization': 'Bearer ' + state.tokens.drive }, body: form });
-  var data = await res.json();
-  if (data.id) log('Uploaded: ' + filename, 'ok');
-  else log('Drive upload failed: ' + JSON.stringify(data), 'err');
+async function appendToNationwide(spreadsheetId, txns) {
+  log('Appending ' + txns.length + ' rows to Nationwide - BS...', 'info');
+
+  // Sort oldest first so rows append in chronological order
+  var sorted = txns.slice().sort(function(a, b) {
+    var da = a.bookingDate || a.valueDate || '';
+    var db = b.bookingDate || b.valueDate || '';
+    return da > db ? 1 : da < db ? -1 : 0;
+  });
+
+  // Build rows matching Nationwide - BS columns: Date, Transaction type, Description, Paid out, Paid in, Balance
+  var rows = sorted.map(function(t) {
+    var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
+    var paidOut = amount < 0 ? '£' + Math.abs(amount).toFixed(2) : '';
+    var paidIn  = amount >= 0 ? '£' + amount.toFixed(2) : '';
+    var raw = (t.remittanceInformationUnstructured || t.remittanceInformationStructured || '').toLowerCase();
+    var txType;
+    if (amount < 0) {
+      if (raw.indexOf('direct debit') !== -1) txType = 'Direct debit';
+      else if (raw.indexOf('visa') !== -1 || raw.indexOf('purchase') !== -1) txType = 'Visa purchase';
+      else if (raw.indexOf('payment to') !== -1 || raw.indexOf('transfer') !== -1) txType = 'Payment to';
+      else if (raw.indexOf('atm') !== -1 || raw.indexOf('withdrawal') !== -1) txType = 'ATM Withdrawal NATIONWIDE';
+      else if (raw.indexOf('cash') !== -1) txType = 'Cash withdrawal';
+      else if (raw.indexOf('foreign currency') !== -1 || raw.indexOf('fx fee') !== -1) txType = 'Foreign currency transaction fee';
+      else txType = 'Direct debit';
+    } else {
+      if (raw.indexOf('interest') !== -1) txType = 'Interest added';
+      else if (raw.indexOf('cash credit') !== -1) txType = 'Cash credit';
+      else txType = 'Bank credit';
+    }
+    var description = t.creditorName || t.debtorName || t.remittanceInformationUnstructured || t.remittanceInformationStructured || '';
+    return [formatNationwideDate(t.bookingDate || t.valueDate || ''), txType, description, paidOut, paidIn, ''];
+  });
+
+  // Append rows to the bottom of Nationwide - BS
+  var appendRes = await fetch(
+    'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/Nationwide%20-%20BS!A:F:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS',
+    {
+      method: 'POST',
+      headers: sheetsHeaders(),
+      body: JSON.stringify({ values: rows })
+    }
+  );
+  var appendData = await appendRes.json();
+  if (appendData.updates) {
+    log('Nationwide - BS: ' + rows.length + ' rows appended.', 'ok');
+  } else {
+    log('Nationwide append error: ' + JSON.stringify(appendData), 'err');
+  }
 }
+
+async function insertIntoTesco(spreadsheetId, txns) {
+  log('Inserting ' + txns.length + ' rows into Tesco - BS after row 1...', 'info');
+
+  // First get the sheet ID for "Tesco - BS"
+  var metaRes = await fetch(
+    'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '?fields=sheets(properties(sheetId,title))',
+    { headers: sheetsHeaders() }
+  );
+  var metaData = await metaRes.json();
+  var tescoSheet = metaData.sheets && metaData.sheets.find(function(s) { return s.properties.title === 'Tesco - BS'; });
+  if (!tescoSheet) { log('Could not find "Tesco - BS" sheet.', 'err'); return; }
+  var sheetId = tescoSheet.properties.sheetId;
+
+  // Sort newest first (most recent at top, under header row)
+  var sorted = txns.slice().sort(function(a, b) {
+    var da = a.bookingDate || a.valueDate || '';
+    var db = b.bookingDate || b.valueDate || '';
+    return db > da ? 1 : db < da ? -1 : 0;
+  });
+
+  // Build rows: Transaction Date, Posting Date, Billing Amount, Merchant, City, County, Postcode, Reference, Debit/Credit, SICMCC Code
+  var rows = sorted.map(function(t) {
+    var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
+    var debitCredit = amount < 0 ? 'Debit' : 'Credit';
+    var billingAmount = '£' + Math.abs(amount).toFixed(2);
+    var merchant = t.creditorName || t.debtorName || '';
+    var remittance = t.remittanceInformationUnstructured || '';
+    var ref = t.endToEndId || t.internalTransactionId || t.transactionId || t.mandateId || '';
+    var sicCode = t.merchantCategoryCode || '';
+    var txDate   = parseTescoTransactionDate(remittance) || formatTescoDate(t.bookingDate || '');
+    var postDate = formatTescoDate(t.bookingDate || '');
+    return [txDate, postDate, billingAmount, merchant, '', '', '', ref, debitCredit, sicCode];
+  });
+
+  // Step 1: Insert blank rows after row 1 (index 1) to make room
+  var insertRes = await fetch(
+    'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + ':batchUpdate',
+    {
+      method: 'POST',
+      headers: sheetsHeaders(),
+      body: JSON.stringify({
+        requests: [{
+          insertDimension: {
+            range: { sheetId: sheetId, dimension: 'ROWS', startIndex: 1, endIndex: 1 + rows.length },
+            inheritFromBefore: false
+          }
+        }]
+      })
+    }
+  );
+  var insertData = await insertRes.json();
+  if (insertData.error) { log('Tesco insert rows error: ' + JSON.stringify(insertData.error), 'err'); return; }
+
+  // Step 2: Write data into the newly inserted rows (starting at row 2)
+  var writeRes = await fetch(
+    'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/Tesco%20-%20BS!A2:J' + (1 + rows.length) + '?valueInputOption=USER_ENTERED',
+    {
+      method: 'PUT',
+      headers: sheetsHeaders(),
+      body: JSON.stringify({ values: rows })
+    }
+  );
+  var writeData = await writeRes.json();
+  if (writeData.updatedRows) {
+    log('Tesco - BS: ' + rows.length + ' rows inserted after row 1.', 'ok');
+  } else {
+    log('Tesco write error: ' + JSON.stringify(writeData), 'err');
+  }
+}
+
+// Find spreadsheet by name in Drive
+async function findSpreadsheet(name) {
+  try {
+    var res = await fetch(
+      "https://www.googleapis.com/drive/v3/files?q=name='" + name + "' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false&fields=files(id,name)",
+      { headers: { 'Authorization': 'Bearer ' + state.tokens.drive } }
+    );
+    var data = await res.json();
+    if (data.files && data.files.length > 0) return data.files[0].id;
+    return null;
+  } catch(e) {
+    log('Error finding spreadsheet: ' + e.message, 'err');
+    return null;
+  }
+}
+
+// Convert Nationwide transactions to 2D array of row values (no header)
+function nationwideToRows(txns) {
+  // Sort newest first
+  var sorted = txns.slice().sort(function(a, b) {
+    var da = a.bookingDate || a.valueDate || '';
+    var db = b.bookingDate || b.valueDate || '';
+    return db > da ? 1 : db < da ? -1 : 0;
+  });
+  var rows = [];
+  for (var i = 0; i < sorted.length; i++) {
+    var t = sorted[i];
+    var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
+    var paidOut = amount < 0 ? Math.abs(amount).toFixed(2) : '';
+    var paidIn  = amount >= 0 ? amount.toFixed(2) : '';
+    var raw = (t.remittanceInformationUnstructured || t.remittanceInformationStructured || '').toLowerCase();
+    var txType;
+    if (amount < 0) {
+      if (raw.indexOf('direct debit') !== -1) txType = 'Direct debit';
+      else if (raw.indexOf('visa') !== -1 || raw.indexOf('purchase') !== -1) txType = 'Visa purchase';
+      else if (raw.indexOf('payment to') !== -1 || raw.indexOf('transfer') !== -1) txType = 'Payment to';
+      else if (raw.indexOf('atm') !== -1 || raw.indexOf('withdrawal') !== -1) txType = 'ATM Withdrawal NATIONWIDE';
+      else if (raw.indexOf('cash') !== -1) txType = 'Cash withdrawal';
+      else if (raw.indexOf('foreign currency') !== -1 || raw.indexOf('fx fee') !== -1) txType = 'Foreign currency transaction fee';
+      else txType = 'Direct debit';
+    } else {
+      if (raw.indexOf('interest') !== -1) txType = 'Interest added';
+      else if (raw.indexOf('cash credit') !== -1) txType = 'Cash credit';
+      else txType = 'Bank credit';
+    }
+    var description = t.creditorName || t.debtorName || t.remittanceInformationUnstructured || t.remittanceInformationStructured || '';
+    rows.push([formatNationwideDate(t.bookingDate || t.valueDate || ''), txType, description, paidOut, paidIn, '']);
+  }
+  return rows;
+}
+
+// Convert Tesco transactions to 2D array of row values (no header)
+function tescoToRows(txns) {
+  var rows = [];
+  for (var i = 0; i < txns.length; i++) {
+    var t = txns[i];
+    var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
+    var debitCredit = amount < 0 ? 'Debit' : 'Credit';
+    var billingAmount = Math.abs(amount).toFixed(2);
+    var merchant = t.creditorName || t.debtorName || '';
+    var remittance = t.remittanceInformationUnstructured || '';
+    var ref = t.endToEndId || t.internalTransactionId || t.transactionId || t.mandateId || t.additionalInformation || '';
+    var sicCode = t.merchantCategoryCode || (t.proprietaryBankTransactionCode ? t.proprietaryBankTransactionCode.code : '') || '';
+    var txDate   = parseTescoTransactionDate(remittance) || formatTescoDate(t.bookingDate || '');
+    var postDate = formatTescoDate(t.bookingDate || '');
+    // Match Tesco - BS column order from the screenshot:
+    // Transaction Date, Posting Date, Billing Amount, Merchant, Merchant City, Merchant County, Merchant Postal Code, Reference Number, Debit/Credit Flag, SICMCC Code
+    rows.push([txDate, postDate, billingAmount, merchant, '', '', '', ref, debitCredit, sicCode]);
+  }
+  return rows;
+}
+
+// Append rows to the BOTTOM of a sheet (after last row with data)
+async function appendToSheet(spreadsheetId, sheetName, rows) {
+  if (!rows.length) return;
+  try {
+    var range = encodeURIComponent(sheetName + '!A:A');
+    var url = 'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/' + range + ':append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS';
+    var res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + state.tokens.drive, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values: rows })
+    });
+    var data = await res.json();
+    if (data.updates) log('Nationwide - BS: appended ' + rows.length + ' rows.', 'ok');
+    else log('Nationwide append error: ' + JSON.stringify(data), 'err');
+  } catch(e) {
+    log('Nationwide append error: ' + e.message, 'err');
+  }
+}
+
+// Insert rows ABOVE row 2 (pushing existing data down) in a sheet
+async function insertIntoSheet(spreadsheetId, sheetName, rows) {
+  if (!rows.length) return;
+  try {
+    // Step 1: get sheet ID by name
+    var metaRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '?fields=sheets.properties',
+      { headers: { 'Authorization': 'Bearer ' + state.tokens.drive } });
+    var meta = await metaRes.json();
+    var sheet = meta.sheets.find(function(s) { return s.properties.title === sheetName; });
+    if (!sheet) { log('Sheet "' + sheetName + '" not found in spreadsheet.', 'err'); return; }
+    var sheetId = sheet.properties.sheetId;
+
+    // Step 2: insert blank rows at row index 1 (after header row 0)
+    var insertRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + ':batchUpdate',
+      {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + state.tokens.drive, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requests: [{
+            insertDimension: {
+              range: { sheetId: sheetId, dimension: 'ROWS', startIndex: 1, endIndex: 1 + rows.length },
+              inheritFromBefore: false
+            }
+          }]
+        })
+      });
+    var insertData = await insertRes.json();
+    if (insertData.error) { log('Insert rows error: ' + insertData.error.message, 'err'); return; }
+
+    // Step 3: write the data into the newly inserted rows
+    var range = encodeURIComponent(sheetName + '!A2');
+    var writeRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/' + range + '?valueInputOption=USER_ENTERED',
+      {
+        method: 'PUT',
+        headers: { 'Authorization': 'Bearer ' + state.tokens.drive, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ values: rows })
+      });
+    var writeData = await writeRes.json();
+    if (writeData.updatedRows) log('Tesco - BS: inserted ' + rows.length + ' rows at top.', 'ok');
+    else log('Tesco write error: ' + JSON.stringify(writeData), 'err');
+  } catch(e) {
+    log('Tesco insert error: ' + e.message, 'err');
+  }
+}
+
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
