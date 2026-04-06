@@ -1206,24 +1206,16 @@ async function saveToDrive() {
   var banks = allDriveBanks.filter(function(b) { return state.transactions[b] && state.transactions[b].length > 0; });
   if (!banks.length) { log('No transactions to save. Fetch first.', 'warn'); return; }
 
-  var sheetNameEl = document.getElementById('sheetName');
-  var targetSheet = (sheetNameEl && sheetNameEl.value.trim()) ? sheetNameEl.value.trim() : 'LunchMoney Start';
-
-  // Use direct spreadsheet ID if provided, otherwise search by name
-  var directId = state.config.spreadsheetId || (document.getElementById('spreadsheetId') ? document.getElementById('spreadsheetId').value.trim() : '');
-  var spreadsheetId;
-  if (directId) {
-    spreadsheetId = directId;
-    log('Using spreadsheet ID: ' + spreadsheetId.slice(0,12) + '...', 'info');
-  } else {
-    log('Looking for spreadsheet: "' + targetSheet + '"...', 'info');
-    spreadsheetId = await findSpreadsheetByName(targetSheet);
-    if (!spreadsheetId) {
-      log('Spreadsheet not found. Paste your Spreadsheet ID in the Google Drive tab of the Config panel.', 'err');
-      return;
-    }
+  // Get spreadsheet ID from input or config
+  var sheetIdEl = document.getElementById('sheetId');
+  var rawId = (sheetIdEl && sheetIdEl.value.trim()) ? sheetIdEl.value.trim() : (state.config.sheetId || '');
+  if (!rawId) {
+    log('No Spreadsheet ID set. Open the Google Drive tab in Config and paste your Spreadsheet ID.', 'err');
+    return;
   }
-  log('Connecting to spreadsheet...', 'info');
+  // Extract ID if user pasted the full URL
+  var spreadsheetId = rawId.replace(/.*\/spreadsheets\/d\/([a-zA-Z0-9_-]+).*/,'$1');
+  log('Using spreadsheet ID: ' + spreadsheetId.slice(0,12) + '...', 'info');
 
   for (var i = 0; i < banks.length; i++) {
     var bankId = banks[i];
@@ -1252,7 +1244,7 @@ async function saveToDrive() {
       else log(bankId + ': ' + rows.length + ' rows added.', 'ok');
     }
   }
-  log('Done! Data saved to "' + targetSheet + '".', 'ok');
+  log('Done! Data saved to your spreadsheet.', 'ok');
 }
 
 function sheetsHeaders() {
