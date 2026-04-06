@@ -1078,6 +1078,39 @@ async function getSheetTabId(spreadsheetId, tabName) {
   return sheet ? sheet.properties.sheetId : null;
 }
 
+// Get the last date value in column A of a sheet
+async function getLastDateInSheet(spreadsheetId, tabName) {
+  try {
+    var res = await fetch(
+      'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/' + encodeURIComponent(tabName) + '!A:A',
+      { headers: { 'Authorization': 'Bearer ' + state.tokens.drive } }
+    );
+    var data = await res.json();
+    if (!data.values || data.values.length < 2) return null;
+    // Find last non-empty cell in column A (skip header row 0)
+    var lastVal = null;
+    for (var i = data.values.length - 1; i >= 1; i--) {
+      if (data.values[i] && data.values[i][0]) { lastVal = data.values[i][0]; break; }
+    }
+    return lastVal; // e.g. "02 Apr 2026"
+  } catch(e) {
+    log('Could not read last date: ' + e.message, 'warn');
+    return null;
+  }
+}
+
+// Parse "02 Apr 2026" back to "2026-04-02" for comparison
+function parseNationwideDate(d) {
+  if (!d) return '';
+  var months = {Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12'};
+  var parts = d.trim().split(' ');
+  if (parts.length === 3) {
+    var day = parts[0].length === 1 ? '0' + parts[0] : parts[0];
+    return parts[2] + '-' + (months[parts[1]] || '01') + '-' + day;
+  }
+  return '';
+}
+
 // Append rows to BOTTOM of sheet (Nationwide)
 async function appendRowsToSheet(spreadsheetId, tabName, rows) {
   var range = encodeURIComponent(tabName) + '!A1';
@@ -1131,17 +1164,45 @@ async function insertRowsAtTop(spreadsheetId, tabName, rows) {
 
 // Convert transactions to 2D array for Sheets API
 function nationwideToRows(txns) {
+  // Sort oldest first for appending to bottom
   var sorted = txns.slice().sort(function(a, b) {
     var da = a.bookingDate || a.valueDate || '';
     var db = b.bookingDate || b.valueDate || '';
     return da > db ? 1 : da < db ? -1 : 0;
   });
+
+  // Reconstruct running balance (same logic as nationwideToCSV)
+  var accId = sorted.length > 0 ? sorted[sorted.length - 1]._account : null;
+  var currentBalance = (state.balances && state.balances.nationwide && accId && state.balances.nationwide[accId] !== undefined)
+    ? state.balances.nationwide[accId] : null;
+
+  // Work backwards from current balance through sorted (oldest first)
+  // current balance = balance after the NEWEST transaction
+  // So for oldest-first array, balance after last row = currentBalance
+  // We need to compute from newest back, then reverse
+  var amountsNewestFirst = sorted.slice().reverse().map(function(t) {
+    return parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
+  });
+  var balancesNewestFirst = [];
+  var runningBal = currentBalance;
+  for (var i = 0; i < amountsNewestFirst.length; i++) {
+    if (runningBal !== null) {
+      balancesNewestFirst.push(runningBal);
+      runningBal = Math.round((runningBal - amountsNewestFirst[i]) * 100) / 100;
+    } else {
+      balancesNewestFirst.push(null);
+    }
+  }
+  // Reverse so balances align with oldest-first sorted array
+  var balances = balancesNewestFirst.reverse();
+
   var rows = [];
   for (var i = 0; i < sorted.length; i++) {
     var t = sorted[i];
     var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
-    var paidOut = amount < 0 ? Math.abs(amount).toFixed(2) : '';
-    var paidIn  = amount >= 0 ? amount.toFixed(2) : '';
+    var paidOut = amount < 0 ? '\u00a3' + Math.abs(amount).toFixed(2) : '';
+    var paidIn  = amount >= 0 ? '\u00a3' + amount.toFixed(2) : '';
+    var balStr  = balances[i] !== null ? '\u00a3' + balances[i].toFixed(2) : '';
     var raw = (t.remittanceInformationUnstructured || t.remittanceInformationStructured || '').toLowerCase();
     var txType;
     if (amount < 0) {
@@ -1158,7 +1219,7 @@ function nationwideToRows(txns) {
       else txType = 'Bank credit';
     }
     var desc = t.creditorName || t.debtorName || t.remittanceInformationUnstructured || '';
-    rows.push([formatNationwideDate(t.bookingDate || t.valueDate || ''), txType, desc, paidOut, paidIn, '']);
+    rows.push([formatNationwideDate(t.bookingDate || t.valueDate || ''), txType, desc, paidOut, paidIn, balStr]);
   }
   return rows;
 }
@@ -1222,11 +1283,50 @@ async function saveToDrive() {
     var txns = state.transactions[bankId];
 
     if (bankId === 'nationwide') {
-      var rows = nationwideToRows(txns);
-      log('Appending ' + rows.length + ' rows to bottom of "Nationwide - BS"...', 'info');
-      var result = await appendRowsToSheet(spreadsheetId, 'Nationwide - BS', rows);
-      if (result && result.error) log('Nationwide error: ' + result.error.message, 'err');
-      else log('Nationwide: ' + rows.length + ' rows added.', 'ok');
+      // Read existing sheet rows to build a deduplication fingerprint set
+      var existingRes = await fetch(
+        'https://sheets.googleapis.com/v4/spreadsheets/' + spreadsheetId + '/values/' + encodeURIComponent('Nationwide - BS') + '!A:F',
+        { headers: { 'Authorization': 'Bearer ' + state.tokens.drive } }
+      );
+      var existingData = await existingRes.json();
+      var existingRows = existingData.values || [];
+
+      // Build a set of fingerprints: "date|description|amount"
+      var existingFingerprints = {};
+      for (var ei = 1; ei < existingRows.length; ei++) {
+        var r = existingRows[ei];
+        var date = (r[0] || '').trim();
+        var desc = (r[2] || '').trim().toLowerCase();
+        var paidOut = (r[3] || '').replace(/[£,]/g,'').trim();
+        var paidIn  = (r[4] || '').replace(/[£,]/g,'').trim();
+        var amt = paidOut || paidIn;
+        var fp = date + '|' + desc + '|' + amt;
+        existingFingerprints[fp] = true;
+      }
+
+      // Filter to only transactions not already in the sheet
+      var newTxns = txns.filter(function(t) {
+        var date = formatNationwideDate(t.bookingDate || t.valueDate || '');
+        var desc = (t.creditorName || t.debtorName || t.remittanceInformationUnstructured || '').trim().toLowerCase();
+        var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
+        var paidOut = amount < 0 ? Math.abs(amount).toFixed(2) : '';
+        var paidIn  = amount >= 0 ? amount.toFixed(2) : '';
+        var amt = paidOut || paidIn;
+        var fp = date + '|' + desc + '|' + amt;
+        return !existingFingerprints[fp];
+      });
+
+      log('Nationwide: ' + txns.length + ' fetched, ' + newTxns.length + ' new (not already in sheet).', 'info');
+
+      if (!newTxns.length) {
+        log('Nationwide: sheet already up to date.', 'ok');
+      } else {
+        var rows = nationwideToRows(newTxns);
+        log('Appending ' + rows.length + ' rows to "Nationwide - BS"...', 'info');
+        var result = await appendRowsToSheet(spreadsheetId, 'Nationwide - BS', rows);
+        if (result && result.error) log('Nationwide error: ' + result.error.message, 'err');
+        else log('Nationwide: ' + rows.length + ' rows added.', 'ok');
+      }
 
     } else if (bankId === 'tesco') {
       var rows = tescoToRows(txns);
