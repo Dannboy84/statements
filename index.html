@@ -362,6 +362,8 @@ function loadSavedConfig() {
     document.getElementById('gcEnv').value         = c.env         || 'production';
     document.getElementById('redirectUri').value   = c.redirectUri || '';
     document.getElementById('driveClientId').value = c.driveClientId || '';
+    if (document.getElementById('spreadsheetId')) document.getElementById('spreadsheetId').value = c.spreadsheetId || '';
+    if (document.getElementById('sheetName')) document.getElementById('sheetName').value = c.sheetName || 'LunchMoney Start';
     document.getElementById('sheetId').value       = c.sheetId       || '';
     return true;
   } catch(e) {
@@ -1047,12 +1049,20 @@ function txnsToRows(bankId, txns) {
 // ── Google Sheets helpers ─────────────────────────────────────────────────────
 
 async function findSpreadsheetByName(name) {
-  var q = encodeURIComponent("name='" + name + "' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false");
+  // Search across all drives including shared drives
+  var params = new URLSearchParams({
+    q: "name='" + name + "' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
+    fields: 'files(id,name)',
+    includeItemsFromAllDrives: 'true',
+    supportsAllDrives: 'true',
+    corpora: 'allDrives'
+  });
   var res = await fetch(
-    'https://www.googleapis.com/drive/v3/files?q=' + q + '&fields=files(id,name)',
+    'https://www.googleapis.com/drive/v3/files?' + params.toString(),
     { headers: { 'Authorization': 'Bearer ' + state.tokens.drive } }
   );
   var data = await res.json();
+  log('Drive search result: ' + JSON.stringify(data).slice(0, 200), 'info');
   if (data.files && data.files.length > 0) return data.files[0].id;
   return null;
 }
@@ -1199,13 +1209,21 @@ async function saveToDrive() {
   var sheetNameEl = document.getElementById('sheetName');
   var targetSheet = (sheetNameEl && sheetNameEl.value.trim()) ? sheetNameEl.value.trim() : 'LunchMoney Start';
 
-  log('Looking for spreadsheet: "' + targetSheet + '"...', 'info');
-  var spreadsheetId = await findSpreadsheetByName(targetSheet);
-  if (!spreadsheetId) {
-    log('Spreadsheet "' + targetSheet + '" not found. Check the name in the Google Drive tab and make sure it is in your Drive.', 'err');
-    return;
+  // Use direct spreadsheet ID if provided, otherwise search by name
+  var directId = state.config.spreadsheetId || (document.getElementById('spreadsheetId') ? document.getElementById('spreadsheetId').value.trim() : '');
+  var spreadsheetId;
+  if (directId) {
+    spreadsheetId = directId;
+    log('Using spreadsheet ID: ' + spreadsheetId.slice(0,12) + '...', 'info');
+  } else {
+    log('Looking for spreadsheet: "' + targetSheet + '"...', 'info');
+    spreadsheetId = await findSpreadsheetByName(targetSheet);
+    if (!spreadsheetId) {
+      log('Spreadsheet not found. Paste your Spreadsheet ID in the Google Drive tab of the Config panel.', 'err');
+      return;
+    }
   }
-  log('Found spreadsheet.', 'ok');
+  log('Connecting to spreadsheet...', 'info');
 
   for (var i = 0; i < banks.length; i++) {
     var bankId = banks[i];
