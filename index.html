@@ -1306,6 +1306,11 @@ async function saveToDrive() {
         existingFingerprints[fp] = true;
       }
       log('Built ' + Object.keys(existingFingerprints).length + ' fingerprints from existing sheet.', 'info');
+      // Log first 3 existing fingerprints so we can verify format
+      var fpKeys = Object.keys(existingFingerprints);
+      for (var di = 0; di < Math.min(3, fpKeys.length); di++) {
+        log('Existing FP sample: ' + fpKeys[fpKeys.length - 1 - di], 'info');
+      }
 
       // Filter to only transactions not already matched in the sheet
       var newTxns = txns.filter(function(t) {
@@ -1316,6 +1321,15 @@ async function saveToDrive() {
         var fp = date + '|' + paidOut + '|' + paidIn;
         return !existingFingerprints[fp];
       });
+      // Log first 3 new transaction fingerprints for comparison
+      for (var di = 0; di < Math.min(3, txns.length); di++) {
+        var t = txns[di];
+        var date = formatNationwideDate(t.bookingDate || t.valueDate || '');
+        var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
+        var paidOut = amount < 0 ? Math.abs(amount).toFixed(2) : '0.00';
+        var paidIn  = amount >= 0 ? amount.toFixed(2) : '0.00';
+        log('New txn FP: ' + date + '|' + paidOut + '|' + paidIn + ' matched=' + !!existingFingerprints[date + '|' + paidOut + '|' + paidIn], 'info');
+      }
 
       log('Nationwide: ' + txns.length + ' fetched, ' + newTxns.length + ' new (not already in sheet).', 'info');
 
