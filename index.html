@@ -98,6 +98,15 @@
   .tab.active { background: var(--accent-dim); border-color: #3a5a3b; color: var(--accent); }
   .tab-content { display: none; }
   .tab-content.active { display: block; }
+  .lm-txn-item { display:flex; align-items:center; gap:10px; padding:8px 10px; border-bottom:1px solid var(--border); font-size:11px; }
+  .lm-txn-item:hover { background:var(--accent-dim); }
+  .lm-txn-item input[type=checkbox] { width:14px;height:14px;flex-shrink:0;cursor:pointer; }
+  .lm-txn-date { color:var(--muted);flex-shrink:0;width:90px; }
+  .lm-txn-payee { flex:1; color:var(--text); }
+  .lm-txn-bank { font-size:10px;color:var(--muted);flex-shrink:0;width:70px;text-align:right; }
+  .lm-txn-amount { flex-shrink:0;width:80px;text-align:right; }
+  .lm-txn-amount.debit { color:var(--tesco-light); }
+  .lm-txn-amount.credit { color:var(--accent); }
   #configBody { overflow: hidden; transition: max-height 0.3s ease; max-height: 0; }
   #configBody.open { max-height: 800px; }
   .search-results { margin-top: 12px; max-height: 300px; overflow-y: auto; }
@@ -240,7 +249,7 @@
       <button class="btn btn-ghost btn-sm" onclick="downloadCSV('tesco')">Tesco CSV</button>
       <button class="btn btn-ghost btn-sm" onclick="downloadCSV('all')">Combined CSV</button>
       <span style="flex:1"></span>
-      <button class="btn btn-primary btn-sm" onclick="saveToDrive()">Save to Google Drive</button>
+      <button class="btn btn-primary btn-sm" onclick="openLMReview()">Review &amp; Import to LunchMoney</button>
     </div>
   </div>
 
@@ -765,7 +774,7 @@ function tescoToCSV(txns) {
     var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
     var debitCredit = amount < 0 ? 'Debit' : 'Credit';
     var billingAmount = '\u00a3' + Math.abs(amount).toFixed(2);
-    var merchant = t.creditorName || t.debtorName || '';
+    var merchant = sanitiseCell(t.creditorName || t.debtorName || '');
     var remittance = t.remittanceInformationUnstructured || '';
     var ref = t.endToEndId
            || t.internalTransactionId
@@ -793,8 +802,8 @@ function genericToCSV(txns) {
       t.bookingDate || t.valueDate || '',
       t.transactionAmount ? t.transactionAmount.amount : '',
       t.transactionAmount ? t.transactionAmount.currency : '',
-      t.remittanceInformationUnstructured || t.remittanceInformationStructured || '',
-      t.creditorName || '', t.debtorName || '',
+      sanitiseCell(t.remittanceInformationUnstructured || t.remittanceInformationStructured || ''),
+      sanitiseCell(t.creditorName || ''), sanitiseCell(t.debtorName || ''),
       t.endToEndId || t.internalTransactionId || '',
       t.status || 'booked', t._account || ''
     ]);
@@ -1046,7 +1055,19 @@ function txnsToRows(bankId, txns) {
   });
 }
 
-// ── Google Sheets helpers ─────────────────────────────────────────────────────
+// ── Google Sheets helpers
+
+// Sanitise a cell value so Google Sheets doesn't interpret it as a formula
+// Prefixes with apostrophe if starts with + - = @ or is a known Sheets function name
+function sanitiseCell(val) {
+  if (!val) return val;
+  var s = String(val);
+  if ('+-=@'.indexOf(s.charAt(0)) !== -1) return "'" + s;
+  // Also catch values that are just letters Sheets might interpret as named ranges
+  if (/^[A-Za-z]+$/.test(s)) return "'" + s;
+  return s;
+}
+
 
 async function findSpreadsheetByName(name) {
   // Search across all drives including shared drives
@@ -1219,8 +1240,7 @@ function nationwideToRows(txns) {
       else txType = 'Bank credit';
     }
     var desc = t.creditorName || t.debtorName || t.remittanceInformationUnstructured || '';
-    // Prefix with apostrophe if starts with +, -, =, @ to prevent Google Sheets treating it as a formula
-    if (desc && '+-=@'.indexOf(desc.charAt(0)) !== -1) desc = "'" + desc;
+    desc = sanitiseCell(desc);
     rows.push([formatNationwideDate(t.bookingDate || t.valueDate || ''), txType, desc, paidOut, paidIn, balStr]);
   }
   return rows;
@@ -1239,7 +1259,7 @@ function tescoToRows(txns) {
     var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
     var debitCredit = amount < 0 ? 'Debit' : 'Credit';
     var billingAmount = Math.abs(amount).toFixed(2);
-    var merchant = t.creditorName || t.debtorName || '';
+    var merchant = sanitiseCell(t.creditorName || t.debtorName || '');
     var remittance = t.remittanceInformationUnstructured || '';
     var ref = t.endToEndId || t.internalTransactionId || t.transactionId || t.additionalInformation || '';
     var sicCode = t.merchantCategoryCode || '';
@@ -1445,7 +1465,7 @@ async function insertIntoTesco(spreadsheetId, txns) {
     var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
     var debitCredit = amount < 0 ? 'Debit' : 'Credit';
     var billingAmount = '£' + Math.abs(amount).toFixed(2);
-    var merchant = t.creditorName || t.debtorName || '';
+    var merchant = sanitiseCell(t.creditorName || t.debtorName || '');
     var remittance = t.remittanceInformationUnstructured || '';
     var ref = t.endToEndId || t.internalTransactionId || t.transactionId || t.mandateId || '';
     var sicCode = t.merchantCategoryCode || '';
@@ -1549,7 +1569,7 @@ function tescoToRows(txns) {
     var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
     var debitCredit = amount < 0 ? 'Debit' : 'Credit';
     var billingAmount = Math.abs(amount).toFixed(2);
-    var merchant = t.creditorName || t.debtorName || '';
+    var merchant = sanitiseCell(t.creditorName || t.debtorName || '');
     var remittance = t.remittanceInformationUnstructured || '';
     var ref = t.endToEndId || t.internalTransactionId || t.transactionId || t.mandateId || t.additionalInformation || '';
     var sicCode = t.merchantCategoryCode || (t.proprietaryBankTransactionCode ? t.proprietaryBankTransactionCode.code : '') || '';
@@ -1626,6 +1646,201 @@ async function insertIntoSheet(spreadsheetId, sheetName, rows) {
   }
 }
 
+
+// ── LunchMoney ───────────────────────────────────────────────────────────────
+
+async function loadLMAssets() {
+  var key = document.getElementById('lmApiKey').value.trim();
+  if (!key) { log('Enter your LunchMoney API key first.', 'warn'); return; }
+  state.config.lmApiKey = key;
+  try {
+    log('Loading LunchMoney assets...', 'info');
+    var res = await fetch('https://dev.lunchmoney.app/v1/assets', {
+      headers: { 'Authorization': 'Bearer ' + key }
+    });
+    var data = await res.json();
+    if (!data.assets) { log('LunchMoney error: ' + JSON.stringify(data), 'err'); return; }
+    log('Found ' + data.assets.length + ' LunchMoney asset(s).', 'ok');
+
+    // Populate dropdowns
+    var nwSel = document.getElementById('lmNationwideAsset');
+    var tsSel = document.getElementById('lmTescoAsset');
+    [nwSel, tsSel].forEach(function(sel) {
+      sel.innerHTML = '<option value="">Select asset...</option>';
+      data.assets.forEach(function(a) {
+        var opt = document.createElement('option');
+        opt.value = a.id;
+        opt.textContent = a.name + (a.institution_name ? ' (' + a.institution_name + ')' : '') + ' — ' + a.type_name;
+        sel.appendChild(opt);
+      });
+    });
+
+    // Restore saved selections
+    if (nwSel.dataset.saved) nwSel.value = nwSel.dataset.saved;
+    if (tsSel.dataset.saved) tsSel.value = tsSel.dataset.saved;
+
+    document.getElementById('lmAssetMapping').style.display = 'block';
+  } catch(e) {
+    log('LunchMoney asset load error: ' + e.message, 'err');
+  }
+}
+
+function openLMReview() {
+  var allBanks = ['nationwide', 'tesco'].concat(Object.keys(state.extraBanks || {}));
+  var allTxns = [];
+  allBanks.forEach(function(bankId) {
+    (state.transactions[bankId] || []).forEach(function(t) {
+      allTxns.push({ txn: t, bankId: bankId });
+    });
+  });
+
+  if (!allTxns.length) { log('No transactions fetched yet. Click Fetch All Banks first.', 'warn'); return; }
+
+  if (!state.config.lmApiKey) { log('Enter your LunchMoney API key in the Config → LunchMoney tab.', 'warn'); return; }
+
+  // Sort newest first
+  allTxns.sort(function(a, b) {
+    var da = a.txn.bookingDate || a.txn.valueDate || '';
+    var db = b.txn.bookingDate || b.txn.valueDate || '';
+    return db > da ? 1 : db < da ? -1 : 0;
+  });
+
+  var list = document.getElementById('lmReviewList');
+  list.innerHTML = '';
+
+  allTxns.forEach(function(item, idx) {
+    var t = item.txn;
+    var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
+    var payee = t.creditorName || t.debtorName || t.remittanceInformationUnstructured || '';
+    var date = t.bookingDate || t.valueDate || '';
+    var isDebit = amount < 0;
+    var amtStr = (isDebit ? '-' : '+') + '£' + Math.abs(amount).toFixed(2);
+
+    var row = document.createElement('div');
+    row.className = 'lm-txn-item';
+    row.dataset.idx = idx;
+
+    var cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = true;
+    cb.id = 'lmcb_' + idx;
+    cb.addEventListener('change', updateLMCount);
+
+    var dateEl = document.createElement('span');
+    dateEl.className = 'lm-txn-date';
+    dateEl.textContent = date;
+
+    var payeeEl = document.createElement('span');
+    payeeEl.className = 'lm-txn-payee';
+    payeeEl.textContent = payee;
+
+    var bankEl = document.createElement('span');
+    bankEl.className = 'lm-txn-bank';
+    bankEl.textContent = item.bankId;
+
+    var amtEl = document.createElement('span');
+    amtEl.className = 'lm-txn-amount ' + (isDebit ? 'debit' : 'credit');
+    amtEl.textContent = amtStr;
+
+    row.appendChild(cb);
+    row.appendChild(dateEl);
+    row.appendChild(payeeEl);
+    row.appendChild(bankEl);
+    row.appendChild(amtEl);
+    list.appendChild(row);
+  });
+
+  // Store for import
+  window._lmTxns = allTxns;
+  updateLMCount();
+  document.getElementById('lmReviewModal').classList.add('open');
+}
+
+function closeLMReview() {
+  document.getElementById('lmReviewModal').classList.remove('open');
+}
+
+function lmSelectAll(checked) {
+  document.querySelectorAll('#lmReviewList input[type=checkbox]').forEach(function(cb) { cb.checked = checked; });
+  updateLMCount();
+}
+
+function updateLMCount() {
+  var total = document.querySelectorAll('#lmReviewList input[type=checkbox]').length;
+  var selected = document.querySelectorAll('#lmReviewList input[type=checkbox]:checked').length;
+  document.getElementById('lmSelectedCount').textContent = selected + ' of ' + total + ' selected';
+}
+
+async function importToLunchMoney() {
+  var key = state.config.lmApiKey;
+  if (!key) { log('No LunchMoney API key set.', 'err'); return; }
+
+  var nwAssetId = state.config.lmNationwideAsset || document.getElementById('lmNationwideAsset').value;
+  var tsAssetId = state.config.lmTescoAsset || document.getElementById('lmTescoAsset').value;
+
+  // Gather selected transactions
+  var selected = [];
+  document.querySelectorAll('#lmReviewList input[type=checkbox]:checked').forEach(function(cb) {
+    var idx = parseInt(cb.closest('.lm-txn-item').dataset.idx);
+    selected.push(window._lmTxns[idx]);
+  });
+
+  if (!selected.length) { log('No transactions selected.', 'warn'); return; }
+
+  closeLMReview();
+  log('Importing ' + selected.length + ' transactions to LunchMoney...', 'info');
+
+  // Build LunchMoney transaction objects
+  var lmTxns = selected.map(function(item) {
+    var t = item.txn;
+    var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
+    var payee = t.creditorName || t.debtorName || t.remittanceInformationUnstructured || 'Unknown';
+    var date = t.bookingDate || t.valueDate || '';
+    var assetId = item.bankId === 'nationwide' ? nwAssetId : item.bankId === 'tesco' ? tsAssetId : null;
+    var notes = t.remittanceInformationUnstructured || '';
+
+    var obj = {
+      date: date,
+      payee: payee,
+      amount: Math.abs(amount).toFixed(4),
+      currency: 'gbp',
+      notes: notes,
+      status: 'cleared'
+    };
+    if (assetId) obj.asset_id = parseInt(assetId);
+    // LunchMoney: positive = expense, negative = income
+    // GoCardless: negative = money out, positive = money in
+    // So we flip: if amount < 0 (money out) it's a positive expense in LM
+    // debit_as_negative param handles this
+    return obj;
+  });
+
+  try {
+    var res = await fetch('https://dev.lunchmoney.app/v1/transactions', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + key,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        transactions: lmTxns,
+        apply_rules: true,
+        check_for_recurring: true,
+        debit_as_negative: false
+      })
+    });
+    var data = await res.json();
+    if (data.ids) {
+      log('Successfully imported ' + data.ids.length + ' transactions to LunchMoney!', 'ok');
+    } else if (data.error) {
+      log('LunchMoney error: ' + JSON.stringify(data.error), 'err');
+    } else {
+      log('LunchMoney response: ' + JSON.stringify(data).slice(0, 200), 'info');
+    }
+  } catch(e) {
+    log('LunchMoney import error: ' + e.message, 'err');
+  }
+}
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
@@ -1902,6 +2117,24 @@ window.addEventListener('load', function() {
   }
 });
 </script>
+<!-- LunchMoney Review Modal -->
+<div class="modal-overlay" id="lmReviewModal" style="align-items:flex-start;padding:24px;overflow-y:auto;">
+  <div class="modal" style="max-width:700px;width:100%;margin:auto;">
+    <h2>Review Transactions</h2>
+    <p>Select the transactions you want to import into LunchMoney. Deselect any you want to skip.</p>
+    <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+      <button class="btn btn-ghost btn-sm" onclick="lmSelectAll(true)">Select all</button>
+      <button class="btn btn-ghost btn-sm" onclick="lmSelectAll(false)">Deselect all</button>
+      <span id="lmSelectedCount" style="font-size:11px;color:var(--muted);align-self:center;"></span>
+    </div>
+    <div id="lmReviewList" style="max-height:50vh;overflow-y:auto;margin-bottom:20px;"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeLMReview()">Cancel</button>
+      <button class="btn btn-primary" onclick="importToLunchMoney()">Import Selected</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="addBankModal">
   <div class="modal" style="max-width:520px">
     <h2>Add a Bank</h2>
