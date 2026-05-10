@@ -1724,63 +1724,93 @@ function openLMReview() {
   });
 
   if (!allTxns.length) { log('No transactions fetched yet. Click Fetch All Banks first.', 'warn'); return; }
-
-  if (!state.config.lmApiKey) { log('Enter your LunchMoney API key in the Config → LunchMoney tab.', 'warn'); return; }
-
-  // Sort newest first
-  allTxns.sort(function(a, b) {
-    var da = a.txn.bookingDate || a.txn.valueDate || '';
-    var db = b.txn.bookingDate || b.txn.valueDate || '';
-    return db > da ? 1 : db < da ? -1 : 0;
-  });
+  if (!state.config.lmApiKey) { log('Enter your LunchMoney API key in the Config \u2192 LunchMoney tab.', 'warn'); return; }
 
   var list = document.getElementById('lmReviewList');
   list.innerHTML = '';
 
-  allTxns.forEach(function(item, idx) {
-    var t = item.txn;
-    var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
-    var payee = t.creditorName || t.debtorName || t.remittanceInformationUnstructured || '';
-    var date = t.bookingDate || t.valueDate || '';
-    var isDebit = amount < 0;
-    var amtStr = (isDebit ? '-' : '+') + '£' + Math.abs(amount).toFixed(2);
-
-    var row = document.createElement('div');
-    row.className = 'lm-txn-item';
-    row.dataset.idx = idx;
-
-    var cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = true;
-    cb.id = 'lmcb_' + idx;
-    cb.addEventListener('change', updateLMCount);
-
-    var dateEl = document.createElement('span');
-    dateEl.className = 'lm-txn-date';
-    dateEl.textContent = date;
-
-    var payeeEl = document.createElement('span');
-    payeeEl.className = 'lm-txn-payee';
-    payeeEl.textContent = payee;
-
-    var bankEl = document.createElement('span');
-    bankEl.className = 'lm-txn-bank';
-    bankEl.textContent = item.bankId;
-
-    var amtEl = document.createElement('span');
-    amtEl.className = 'lm-txn-amount ' + (isDebit ? 'debit' : 'credit');
-    amtEl.textContent = amtStr;
-
-    row.appendChild(cb);
-    row.appendChild(dateEl);
-    row.appendChild(payeeEl);
-    row.appendChild(bankEl);
-    row.appendChild(amtEl);
-    list.appendChild(row);
+  // Group transactions by bank, sorted newest first within each group
+  var groups = {};
+  allBanks.forEach(function(bankId) {
+    var txns = (state.transactions[bankId] || []).slice().sort(function(a, b) {
+      var da = a.bookingDate || a.valueDate || '';
+      var db = b.bookingDate || b.valueDate || '';
+      return db > da ? 1 : db < da ? -1 : 0;
+    });
+    if (txns.length > 0) groups[bankId] = txns;
   });
 
-  // Store for import
-  window._lmTxns = allTxns;
+  // Flatten into allTxns in bank-grouped order with index for checkbox reference
+  window._lmTxns = [];
+  Object.keys(groups).forEach(function(bankId) {
+    groups[bankId].forEach(function(t) {
+      window._lmTxns.push({ txn: t, bankId: bankId });
+    });
+  });
+
+  // Render grouped sections
+  var globalIdx = 0;
+  Object.keys(groups).forEach(function(bankId) {
+    var bankLabel = bankId === 'nationwide' ? 'Nationwide' : bankId === 'tesco' ? 'Tesco Bank' : (state.extraBanks[bankId] ? state.extraBanks[bankId].name : bankId);
+    var txns = groups[bankId];
+
+    // Section header
+    var header = document.createElement('div');
+    header.style.cssText = 'padding:10px 10px 6px;font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--accent);border-bottom:1px solid var(--border);margin-top:8px;display:flex;align-items:center;justify-content:space-between;';
+    header.innerHTML = '<span>' + bankLabel + ' <span style="color:var(--muted);font-size:9px;">(' + txns.length + ' transactions)</span></span>'
+      + '<span style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" style="padding:3px 8px;font-size:10px" onclick="lmSelectBank(\'' + bankId + '\',true)">All</button>'
+      + '<button class="btn btn-ghost btn-sm" style="padding:3px 8px;font-size:10px" onclick="lmSelectBank(\'' + bankId + '\',false)">None</button></span>';
+    list.appendChild(header);
+
+    txns.forEach(function(t) {
+      var idx = globalIdx++;
+      var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
+      var payee = t.creditorName || t.debtorName || t.remittanceInformationUnstructured || '';
+      var date = t.bookingDate || t.valueDate || '';
+      var isPending = t.status === 'pending' || (!t.bookingDate && t.valueDate);
+      var isDebit = amount < 0;
+      var amtStr = (isDebit ? '-' : '+') + '\u00a3' + Math.abs(amount).toFixed(2);
+
+      var row = document.createElement('div');
+      row.className = 'lm-txn-item';
+      row.dataset.idx = idx;
+      row.dataset.bankId = bankId;
+      if (isPending) row.style.opacity = '0.7';
+
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !isPending; // pending unchecked by default
+      cb.id = 'lmcb_' + idx;
+      cb.addEventListener('change', updateLMCount);
+
+      var dateEl = document.createElement('span');
+      dateEl.className = 'lm-txn-date';
+      dateEl.textContent = date;
+
+      var payeeEl = document.createElement('span');
+      payeeEl.className = 'lm-txn-payee';
+      payeeEl.textContent = payee;
+
+      var amtEl = document.createElement('span');
+      amtEl.className = 'lm-txn-amount ' + (isDebit ? 'debit' : 'credit');
+      amtEl.textContent = amtStr;
+
+      row.appendChild(cb);
+      row.appendChild(dateEl);
+      row.appendChild(payeeEl);
+
+      if (isPending) {
+        var badge = document.createElement('span');
+        badge.style.cssText = 'font-size:9px;padding:2px 6px;border-radius:100px;background:rgba(240,192,96,0.15);color:var(--warning);border:1px solid rgba(240,192,96,0.3);flex-shrink:0;';
+        badge.textContent = 'PENDING';
+        row.appendChild(badge);
+      }
+
+      row.appendChild(amtEl);
+      list.appendChild(row);
+    });
+  });
+
   updateLMCount();
   document.getElementById('lmReviewModal').classList.add('open');
 }
@@ -1794,10 +1824,23 @@ function lmSelectAll(checked) {
   updateLMCount();
 }
 
+function lmSelectBank(bankId, checked) {
+  document.querySelectorAll('#lmReviewList .lm-txn-item').forEach(function(row) {
+    if (row.dataset.bankId === bankId) {
+      var cb = row.querySelector('input[type=checkbox]');
+      if (cb) cb.checked = checked;
+    }
+  });
+  updateLMCount();
+}
+
 function updateLMCount() {
-  var total = document.querySelectorAll('#lmReviewList input[type=checkbox]').length;
-  var selected = document.querySelectorAll('#lmReviewList input[type=checkbox]:checked').length;
-  document.getElementById('lmSelectedCount').textContent = selected + ' of ' + total + ' selected';
+  var allCbs = document.querySelectorAll('#lmReviewList input[type=checkbox]');
+  var checkedCbs = document.querySelectorAll('#lmReviewList input[type=checkbox]:checked');
+  var pendingRows = document.querySelectorAll('#lmReviewList .lm-txn-item[style*="opacity"]');
+  document.getElementById('lmSelectedCount').textContent =
+    checkedCbs.length + ' of ' + allCbs.length + ' selected'
+    + (pendingRows.length > 0 ? ' · ' + pendingRows.length + ' pending (unchecked by default)' : '');
 }
 
 async function importToLunchMoney() {
