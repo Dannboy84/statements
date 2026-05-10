@@ -686,8 +686,18 @@ async function fetchAll() {
         var url = gcBase() + '/accounts/' + accId + '/transactions/?date_from=' + from + '&date_to=' + to;
         var res = await fetch(url, { headers: gcHeaders() });
         var data = await res.json();
-        var txns = (data.transactions ? (data.transactions.booked || []).concat(data.transactions.pending || []) : []);
-        for (var ti = 0; ti < txns.length; ti++) txns[ti]._account = accId;
+        var booked  = (data.transactions ? (data.transactions.booked  || []) : []);
+        var pending = (data.transactions ? (data.transactions.pending || []) : []);
+        // Tag pending transactions explicitly so review screen can identify them
+        for (var ti = 0; ti < pending.length; ti++) {
+          pending[ti]._account = accId;
+          pending[ti]._pending = true;
+        }
+        for (var ti = 0; ti < booked.length; ti++) {
+          booked[ti]._account = accId;
+          booked[ti]._pending = false;
+        }
+        var txns = booked.concat(pending);
         state.transactions[bankId] = state.transactions[bankId].concat(txns);
         totalFetched += txns.length;
         log(bankId + ' (' + accId.slice(0,8) + '): ' + txns.length + ' transactions fetched.', 'ok');
@@ -1767,7 +1777,7 @@ function openLMReview() {
       var amount = parseFloat(t.transactionAmount ? t.transactionAmount.amount : 0);
       var payee = t.creditorName || t.debtorName || t.remittanceInformationUnstructured || '';
       var date = t.bookingDate || t.valueDate || '';
-      var isPending = t.status === 'pending' || (!t.bookingDate && t.valueDate);
+      var isPending = t._pending === true;
       var isDebit = amount < 0;
       var amtStr = (isDebit ? '-' : '+') + '\u00a3' + Math.abs(amount).toFixed(2);
 
